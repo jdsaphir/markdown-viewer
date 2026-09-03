@@ -96,6 +96,7 @@ const state = {
   sync: store.get('sync', true),
   watching: store.get('watch', false),
   watchTimer: null,
+  dirtyCount: 0,
   mermaidTheme: null,
   seq: 0
 };
@@ -656,18 +657,21 @@ function showDoc(id) {
   revokeObjectUrls();
   state.activeId = id;
   $('#app').classList.add('has-doc');
+  $('#doc-actions').hidden = false;
+  $('#st-caret').hidden = false;
 
-  const title = $('#doc-title');
-  title.classList.remove('is-empty');
-  title.innerHTML = `<span class="doc-name">${escapeHtml(doc.name)}</span>`
-    + (doc.dir ? `<span class="doc-path">${escapeHtml(doc.dir)}</span>` : '');
-  title.title = doc.path;
-  document.title = doc.name + ' — Markdown Viewer';
+  setDocTitle(doc);
 
+  // Assigning value also resets the textarea's native undo stack, which is
+  // what you want when moving between documents.
+  editorInput.value = doc.text;
+  editorInput.setSelectionRange(0, 0);
   renderRaw(doc.text);
   renderMarkdown(doc.text);
 
   updateStats(doc);
+  updateCaretStatus();
+  refreshDirty();
 
   $('#raw-scroll').scrollTop = 0;
   $('#rendered-scroll').scrollTop = 0;
@@ -684,12 +688,23 @@ function addDocs(entries, { activate = true, quiet = false } = {}) {
     const path = e.path || e.name;
     const existing = state.docs.find((d) => (e.fullPath ? d.fullPath === e.fullPath : d.path === path));
     const slash = path.lastIndexOf('/');
+    const norm = normaliseText(e.text);
+
+    // Re-opening a file that has unsaved edits must never discard them.
+    if (existing && isDirty(existing)) {
+      if (!firstNew) firstNew = existing.id;
+      toast(existing.name + ' has unsaved changes — kept as they are');
+      continue;
+    }
+
     const doc = {
       id: existing ? existing.id : 'd' + (state.seq++),
       name: path.slice(slash + 1),
       dir: slash > 0 ? path.slice(0, slash) : '',
       path,
-      text: e.text,
+      text: norm.text,
+      savedText: norm.text,
+      eol: norm.eol,
       size: e.size != null ? e.size : new Blob([e.text]).size,
       handle: e.handle || null,
       fullPath: e.fullPath || null,
@@ -743,9 +758,13 @@ function renderFileList() {
   for (const [dir, items] of groups) {
     if (groups.size > 1 || dir) html += `<div class="file-group" title="${escapeHtml(dir || 'Loose files')}">${escapeHtml(dir || 'Loose files')}</div>`;
     for (const d of items) {
-      html += `<button class="file-item${d.id === state.activeId ? ' is-active' : ''}" data-id="${d.id}" title="${escapeHtml(d.path)}">`
+      const dirty = isDirty(d);
+      html += `<button class="file-item${d.id === state.activeId ? ' is-active' : ''}" data-id="${d.id}"`
+        + ` title="${escapeHtml(d.path)}${dirty ? ' (unsaved changes)' : ''}">`
         + `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.3 1.8H4.2a1.4 1.4 0 0 0-1.4 1.4v9.6a1.4 1.4 0 0 0 1.4 1.4h7.6a1.4 1.4 0 0 0 1.4-1.4V5.6z"/><path d="M9.3 1.8v3.8h3.9"/></svg>`
-        + `<span class="name">${highlight(d.name)}</span></button>`;
+        + `<span class="name">${highlight(d.name)}</span>`
+        + (dirty ? '<span class="file-dirty" aria-label="Unsaved changes">*</span>' : '')
+        + `</button>`;
     }
   }
   list.innerHTML = html;
@@ -756,6 +775,10 @@ function renderFileList() {
 }
 
 function clearDocs() {
+  const unsaved = state.docs.filter(isDirty).length;
+  if (unsaved && !window.confirm(
+      unsaved + (unsaved === 1 ? ' file has' : ' files have') + ' unsaved changes.\n\nClose them anyway?')) return;
+
   revokeObjectUrls();
   stopWatch();
   state.docs = [];
@@ -763,13 +786,17 @@ function clearDocs() {
   state.activeId = null;
   renderedEl.innerHTML = '';
   rawEl.innerHTML = '';
+  editorInput.value = '';
   $('#app').classList.remove('has-doc');
+  $('#doc-actions').hidden = true;
+  $('#st-caret').hidden = true;
   $('#doc-title').innerHTML = '<span class="doc-name">No document</span>';
   $('#doc-title').classList.add('is-empty');
   $('#st-words').textContent = 'Ready';
   $('#st-lines').textContent = '';
   $('#st-read').textContent = '';
   document.title = 'Markdown Viewer';
+  refreshDirty();
   renderFileList();
   buildOutline();
 }
@@ -952,10 +979,12 @@ function rerenderActive() {
   if (!doc) return;
   const rendered = getScrollRatio($('#rendered-scroll'));
   const raw = getScrollRatio($('#raw-scroll'));
+  editorInput.value = doc.text;
   renderRaw(doc.text);
   renderMarkdown(doc.text);
   updateStats(doc);
-  doc.dirty = false;
+  refreshDirty();
+  doc.pendingReload = false;
   requestAnimationFrame(() => {
     setScrollRatio($('#rendered-scroll'), rendered);
     setScrollRatio($('#raw-scroll'), raw);
@@ -984,12 +1013,35 @@ if (host) {
     if (msg.type === 'update') {
       const doc = state.docs.find((d) => d.fullPath === msg.fullPath);
       if (!doc) return;
-      doc.text = msg.text;
+
+      // A change on disk must never silently discard unsaved edits.
+      if (isDirty(doc)) {
+        toast(doc.name + ' changed on disk — your unsaved edits were kept');
+        return;
+      }
+
+      const norm = normaliseText(msg.text);
+      doc.text = norm.text;
+      doc.savedText = norm.text;
+      doc.eol = norm.eol;
       if (msg.size != null) doc.size = msg.size;
       if (doc.id !== state.activeId) return;   // picked up when it is opened
-      if (!state.watching) { doc.dirty = true; return; }
+      if (!state.watching) { doc.pendingReload = true; return; }
       rerenderActive();
       toast('Reloaded ' + doc.name);
+      return;
+    }
+
+    if (msg.type === 'saved') {
+      const doc = state.docs.find((d) => d.id === msg.docId);
+      if (!doc) return;
+      if (msg.fullPath) doc.fullPath = msg.fullPath;
+      markSaved(doc, msg.path || null, msg.name || null);
+      return;
+    }
+
+    if (msg.type === 'saveError') {
+      toast('Could not save: ' + (msg.message || 'unknown error'));
       return;
     }
 
@@ -1014,7 +1066,7 @@ function setupWatch() {
     btn.hidden = !(doc && doc.fullPath);
     btn.classList.toggle('is-on', state.watching);
     btn.setAttribute('aria-pressed', String(state.watching));
-    if (state.watching && doc && doc.dirty) { rerenderActive(); toast('Reloaded ' + doc.name); }
+    if (state.watching && doc && doc.pendingReload) { rerenderActive(); toast('Reloaded ' + doc.name); }
     return;
   }
 
@@ -1051,6 +1103,345 @@ function getScrollRatio(el) {
 function setScrollRatio(el, ratio) {
   const max = el.scrollHeight - el.clientHeight;
   if (max > 0) el.scrollTop = ratio * max;
+}
+
+/* ======================================================================
+   Editor
+
+   The raw pane is a real editor: a transparent <textarea> laid exactly over
+   the highlighted mirror. Keeping the browser's own text control means undo,
+   redo, selection, IME and accessibility all work without reimplementation.
+   ====================================================================== */
+
+const editorInput = $('#raw-input');
+const INDENT = '  ';
+
+/** Editors normalise to \n; the file's own line endings are restored on save. */
+function normaliseText(raw) {
+  const s = String(raw == null ? '' : raw);
+  return { text: s.replace(/\r\n?/g, '\n'), eol: /\r\n/.test(s) ? '\r\n' : '\n' };
+}
+
+function isDirty(doc) {
+  return !!doc && doc.savedText !== undefined && doc.text !== doc.savedText;
+}
+
+function setDocTitle(doc) {
+  const title = $('#doc-title');
+  const dirty = isDirty(doc);
+  title.classList.remove('is-empty');
+  title.innerHTML = `<span class="doc-name">${escapeHtml(doc.name)}</span>`
+    + (dirty ? '<span class="doc-dirty" title="Unsaved changes">*</span>' : '')
+    + (doc.dir ? `<span class="doc-path">${escapeHtml(doc.dir)}</span>` : '');
+  title.title = doc.path + (dirty ? ' (unsaved changes)' : '');
+  document.title = doc.name + (dirty ? ' *' : '') + ' — Markdown Viewer';
+}
+
+/** Recomputes everything that depends on "is there unsaved work". */
+function refreshDirty() {
+  const doc = activeDoc();
+  const dirty = isDirty(doc);
+  const count = state.docs.filter(isDirty).length;
+
+  const save = $('#btn-save');
+  save.disabled = !dirty;
+  save.classList.toggle('is-dirty', dirty);
+  $('#btn-save-as').disabled = !doc;
+
+  if (doc) setDocTitle(doc);
+  if (count !== state.dirtyCount) {
+    state.dirtyCount = count;
+    hostSend({ type: 'dirtyState', count: count });   // lets the host guard closing
+  }
+  renderFileList();
+}
+
+/* --- mirror ---------------------------------------------------------- */
+
+let mirrorRaf = 0;
+let mirrorTimer = 0;
+
+/**
+ * Re-highlights at most once per frame, so typing never outruns the paint.
+ * A timer backs up the frame callback because requestAnimationFrame is paused
+ * while the window is hidden, and the mirror must never lag behind the text.
+ */
+function scheduleMirror() {
+  if (mirrorRaf || mirrorTimer) return;
+  const run = () => {
+    if (mirrorRaf) { cancelAnimationFrame(mirrorRaf); mirrorRaf = 0; }
+    if (mirrorTimer) { clearTimeout(mirrorTimer); mirrorTimer = 0; }
+    renderRaw(editorInput.value);
+    markCaretLine();
+  };
+  mirrorRaf = requestAnimationFrame(run);
+  mirrorTimer = setTimeout(run, 40);
+}
+
+let previewTimer = 0;
+
+/** The rendered pane is heavier (parse, sanitise, KaTeX, Mermaid), so it waits. */
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => {
+    const doc = activeDoc();
+    if (!doc) return;
+    const ratio = getScrollRatio($('#rendered-scroll'));
+    renderMarkdown(doc.text);
+    updateStats(doc);
+    setTimeout(() => setScrollRatio($('#rendered-scroll'), ratio), 0);
+  }, 320);
+}
+
+function caretLineIndex() {
+  const pos = editorInput.selectionStart;
+  const upto = editorInput.value.slice(0, pos);
+  return upto.length - upto.replace(/\n/g, '').length;   // number of newlines before the caret
+}
+
+function markCaretLine() {
+  const previous = rawEl.querySelector('.raw-line.is-caret');
+  if (previous) previous.classList.remove('is-caret');
+  if (document.activeElement !== editorInput) return;
+  const row = rawEl.children[caretLineIndex()];
+  if (row) row.classList.add('is-caret');
+}
+
+function updateCaretStatus() {
+  const el = $('#st-caret');
+  const doc = activeDoc();
+  if (!doc) { el.hidden = true; return; }
+  el.hidden = false;
+
+  const pos = editorInput.selectionStart;
+  const upto = editorInput.value.slice(0, pos);
+  const line = upto.length - upto.replace(/\n/g, '').length + 1;
+  const col = pos - (upto.lastIndexOf('\n') + 1) + 1;
+  const selected = editorInput.selectionEnd - editorInput.selectionStart;
+  el.textContent = 'Ln ' + line + ', Col ' + col + (selected ? '  (' + selected + ' selected)' : '');
+}
+
+/* --- text mutation --------------------------------------------------- */
+
+/**
+ * Inserts through execCommand where possible: it is the only way to change a
+ * textarea while keeping the browser's native undo history intact.
+ */
+function insertText(str) {
+  editorInput.focus();
+  let inserted = false;
+  try { inserted = document.execCommand('insertText', false, str); }
+  catch (_) { inserted = false; }
+  if (!inserted) {
+    const start = editorInput.selectionStart;
+    const end = editorInput.selectionEnd;
+    editorInput.setRangeText(str, start, end, 'end');
+    editorInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+function indentSelection(outdent) {
+  const value = editorInput.value;
+  const selStart = editorInput.selectionStart;
+  const selEnd = editorInput.selectionEnd;
+  const lineStart = value.lastIndexOf('\n', selStart - 1) + 1;
+  let lineEnd = value.indexOf('\n', selEnd);
+  if (lineEnd === -1) lineEnd = value.length;
+
+  const block = value.slice(lineStart, lineEnd);
+  const spansLines = selStart !== selEnd && block.indexOf('\n') !== -1;
+
+  if (!spansLines && !outdent) { insertText(INDENT); return; }
+
+  let firstDelta = 0;
+  let total = 0;
+  const rewritten = block.split('\n').map((line, i) => {
+    if (outdent) {
+      const m = /^( {1,2}|\t)/.exec(line);
+      if (!m) return line;
+      if (i === 0) firstDelta = -m[0].length;
+      total -= m[0].length;
+      return line.slice(m[0].length);
+    }
+    if (i === 0) firstDelta = INDENT.length;
+    total += INDENT.length;
+    return INDENT + line;
+  }).join('\n');
+
+  if (rewritten === block) return;
+
+  editorInput.setSelectionRange(lineStart, lineEnd);
+  insertText(rewritten);
+
+  const start = Math.max(lineStart, selStart + firstDelta);
+  editorInput.setSelectionRange(start, Math.max(start, selEnd + total));
+}
+
+const LIST_ITEM = /^([ \t]*)([-*+]|\d+[.)])([ \t]+)(\[[ xX]\][ \t]+)?(.*)$/;
+const QUOTE = /^([ \t]*(?:>[ \t]?)+)(.*)$/;
+
+/** Enter continues lists, task lists, blockquotes and plain indentation. */
+function continueBlock(e) {
+  if (editorInput.selectionStart !== editorInput.selectionEnd) return;
+  const value = editorInput.value;
+  const pos = editorInput.selectionStart;
+  const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+  const line = value.slice(lineStart, pos);
+
+  const list = LIST_ITEM.exec(line);
+  if (list) {
+    const [, indent, marker, gap, task, content] = list;
+    e.preventDefault();
+    if (!content.trim()) {
+      // Enter on an empty item ends the list rather than adding another.
+      editorInput.setSelectionRange(lineStart, pos);
+      insertText('');
+      return;
+    }
+    const next = /^\d/.test(marker)
+      ? String(parseInt(marker, 10) + 1) + marker.slice(-1)
+      : marker;
+    insertText('\n' + indent + next + gap + (task ? '[ ] ' : ''));
+    return;
+  }
+
+  const quote = QUOTE.exec(line);
+  if (quote) {
+    e.preventDefault();
+    if (!quote[2].trim()) { editorInput.setSelectionRange(lineStart, pos); insertText(''); return; }
+    insertText('\n' + quote[1]);
+    return;
+  }
+
+  const indent = /^[ \t]*/.exec(line)[0];
+  if (indent) { e.preventDefault(); insertText('\n' + indent); }
+}
+
+/* --- saving ---------------------------------------------------------- */
+
+/** Applies the file's own line endings just before the bytes leave the page. */
+function textForDisk(doc) {
+  return doc.eol === '\r\n' ? doc.text.replace(/\n/g, '\r\n') : doc.text;
+}
+
+function markSaved(doc, path, name) {
+  doc.savedText = doc.text;
+  doc.size = new Blob([textForDisk(doc)]).size;
+  if (path) {
+    doc.path = path;
+    const slash = path.lastIndexOf('/');
+    doc.name = path.slice(slash + 1);
+    doc.dir = slash > 0 ? path.slice(0, slash) : '';
+  }
+  if (name) doc.name = name;
+  refreshDirty();
+  if (doc.id === state.activeId) { updateStats(doc); setupWatch(); }
+  toast('Saved ' + doc.name);
+}
+
+async function ensureWritable(handle) {
+  if (!handle || typeof handle.queryPermission !== 'function') return true;
+  if (await handle.queryPermission({ mode: 'readwrite' }) === 'granted') return true;
+  return await handle.requestPermission({ mode: 'readwrite' }) === 'granted';
+}
+
+function downloadText(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+async function saveActive(saveAs) {
+  const doc = activeDoc();
+  if (!doc) return;
+  if (!saveAs && !isDirty(doc)) { toast('No changes to save'); return; }
+  const payload = textForDisk(doc);
+
+  // In the desktop app the host owns the filesystem; it replies with 'saved'.
+  if (host) {
+    hostSend(saveAs || !doc.fullPath
+      ? { type: 'saveAs', docId: doc.id, name: doc.name, text: payload }
+      : { type: 'save', docId: doc.id, fullPath: doc.fullPath, text: payload });
+    return;
+  }
+
+  try {
+    if (!saveAs && doc.handle && await ensureWritable(doc.handle)) {
+      const writable = await doc.handle.createWritable();
+      await writable.write(payload);
+      await writable.close();
+      markSaved(doc);
+      return;
+    }
+
+    if (typeof window.showSaveFilePicker === 'function') {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: doc.name,
+        types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md', '.markdown', '.mdx', '.txt'] } }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(payload);
+      await writable.close();
+      doc.handle = handle;
+      markSaved(doc, null, handle.name);
+      return;
+    }
+
+    // No filesystem access at all (Firefox, or a file:// page): hand it over
+    // as a download, which is the only write a browser will allow.
+    downloadText(doc.name, payload);
+    doc.savedText = doc.text;
+    refreshDirty();
+    toast('Downloaded ' + doc.name);
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    toast('Could not save: ' + ((err && err.message) || 'unknown error'));
+  }
+}
+
+/* --- wiring ---------------------------------------------------------- */
+
+function initEditor() {
+  editorInput.addEventListener('input', () => {
+    const doc = activeDoc();
+    if (!doc) return;
+    doc.text = editorInput.value;
+    scheduleMirror();
+    schedulePreview();
+    updateCaretStatus();
+    refreshDirty();
+  });
+
+  editorInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      indentSelection(e.shiftKey);
+      return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      continueBlock(e);
+    }
+  });
+
+  const caretMoved = () => { updateCaretStatus(); markCaretLine(); };
+  editorInput.addEventListener('click', caretMoved);
+  editorInput.addEventListener('keyup', caretMoved);
+  editorInput.addEventListener('select', caretMoved);
+  editorInput.addEventListener('focus', caretMoved);
+  editorInput.addEventListener('blur', markCaretLine);
+  if ('onselectionchange' in document) {
+    document.addEventListener('selectionchange', () => {
+      if (document.activeElement === editorInput) caretMoved();
+    });
+  }
+
+  $('#btn-save').addEventListener('click', () => saveActive(false));
+  $('#btn-save-as').addEventListener('click', () => saveActive(true));
 }
 
 /* ======================================================================
@@ -1266,6 +1657,7 @@ function initEvents() {
     const typing = tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable;
     const mod = e.ctrlKey || e.metaKey;
 
+    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(e.shiftKey); return; }
     if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); pickFiles(); return; }
     if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); return; }
     if (mod && e.key.toLowerCase() === 'p') { e.preventDefault(); window.print(); return; }
@@ -1287,7 +1679,11 @@ function initEvents() {
     }
   });
 
-  window.addEventListener('beforeunload', revokeObjectUrls);
+  window.addEventListener('beforeunload', (e) => {
+    revokeObjectUrls();
+    // In the desktop app the host puts up its own confirmation instead.
+    if (!host && state.dirtyCount > 0) { e.preventDefault(); e.returnValue = ''; }
+  });
 }
 
 /* ------------------------------------------------------------------- boot */
@@ -1305,7 +1701,9 @@ function init() {
 
   initGutter();
   initScrollSync();
+  initEditor();
   initEvents();
+  refreshDirty();
   renderFileList();
 }
 

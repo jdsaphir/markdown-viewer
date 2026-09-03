@@ -1,7 +1,8 @@
 # Markdown Viewer
 
-A small, good-looking Markdown viewer. Open a `.md` file as **raw source**, as a
-**rendered document**, or **both side by side** with a divider you can drag.
+A small, good-looking Markdown viewer and editor. Open a `.md` file as **raw
+source**, as a **rendered document**, or **both side by side** with a divider you
+can drag — and edit the source with the rendered side updating as you type.
 
 It runs two ways: as a **Windows desktop app** in its own window, or as a plain
 web page you open in a browser. Same app either way — no build step, no
@@ -71,12 +72,46 @@ and Edge.
 
 | View | What you get |
 | --- | --- |
-| **Raw** | The Markdown source, syntax-highlighted, with line numbers |
+| **Raw** | An editor for the Markdown source, syntax-highlighted, with line numbers |
 | **Rendered** | The formatted document |
 | **Split** | Both, with a draggable divider and synchronised scrolling |
 
 Drag the divider to give either side more room. Double-click it to snap back to
 50/50, or focus it and use the arrow keys. The position is remembered.
+
+---
+
+## Editing
+
+The raw pane is a real editor, in both Raw and Split view. Type in it and the
+rendered side follows a moment later.
+
+- **Unsaved changes** show as an asterisk after the file name — in the toolbar,
+  the sidebar, and the window title. It clears itself if you undo back to what
+  is on disk.
+- **Save** writes in place; **Save as…** picks a new file and retargets the
+  document to it.
+- **Undo and redo** are the browser's own, so they behave exactly as you expect.
+- <kbd>Tab</kbd> indents, <kbd>Shift</kbd>+<kbd>Tab</kbd> outdents, and both work
+  across a multi-line selection.
+- <kbd>Enter</kbd> continues what you are in the middle of: bullets, numbered
+  items (incrementing as it goes), task list items, blockquotes, and plain
+  indentation. Pressing it on an empty item ends the list instead.
+- The status bar shows **line and column**, and the selected character count.
+
+Nothing is written until you ask for it, and nothing overwrites your work:
+
+- Closing with unsaved changes asks first.
+- If a file changes **on disk** while you have unsaved edits, auto-reload backs
+  off and keeps your version, telling you it did.
+- Re-opening a file that has unsaved edits keeps the edits rather than
+  reloading over them.
+- A file's existing line endings (CRLF or LF) are preserved on save, so editing
+  one line does not rewrite every line in your diff.
+
+In a browser rather than the desktop app, saving uses the File System Access API
+where it exists (Chrome, Edge) and otherwise falls back to downloading the file,
+which is the only write a browser will permit.
 
 ---
 
@@ -129,6 +164,10 @@ status bar.
 
 | Key | Action |
 | --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Save as… |
+| <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | Indent / outdent (in the editor) |
+| <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> | Undo / redo (in the editor) |
 | <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Raw / Split / Rendered |
 | <kbd>4</kbd> | Toggle the outline |
 | <kbd>T</kbd> | Cycle theme: auto → light → dark |
@@ -137,6 +176,9 @@ status bar.
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Toggle the sidebar |
 | <kbd>Ctrl</kbd>+<kbd>K</kbd> | Jump to the file filter |
 | <kbd>Ctrl</kbd>+<kbd>P</kbd> | Print — or save the rendered document as PDF |
+
+The single-letter shortcuts only fire outside the editor, so typing `t` in your
+document does not change the theme.
 
 Printing outputs the rendered document alone: no sidebar, no toolbar, no raw pane.
 

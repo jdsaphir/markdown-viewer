@@ -249,6 +249,7 @@ namespace MarkdownViewer
 
         private CoreWebView2Environment _env;
         private bool _ready;
+        private int _unsavedCount;   // reported by the page, used to guard closing
 
         internal MainForm(string[] args)
         {
@@ -275,7 +276,7 @@ namespace MarkdownViewer
             Controls.Add(_web);
 
             Load += OnLoad;
-            FormClosing += delegate { WindowPlacement.Save(this); };
+            FormClosing += OnFormClosing;
         }
 
         private async void OnLoad(object sender, EventArgs e)
@@ -440,7 +441,77 @@ namespace MarkdownViewer
                 case "openFiles": ShowOpenFiles(); break;
                 case "openFolder": ShowOpenFolder(); break;
                 case "unwatchAll": StopWatching(); break;
+                case "save": SaveDocument(msg, false); break;
+                case "saveAs": SaveDocument(msg, true); break;
+                case "dirtyState":
+                    try { _unsavedCount = Convert.ToInt32(msg["count"], CultureInfo.InvariantCulture); }
+                    catch (Exception) { _unsavedCount = 0; }
+                    break;
             }
+        }
+
+        /// <summary>Writes a document to disk, prompting for a path when needed.</summary>
+        private void SaveDocument(Dictionary<string, object> msg, bool saveAs)
+        {
+            string docId = Str(msg, "docId");
+            string text = Str(msg, "text");
+            string path = Str(msg, "fullPath");
+
+            if (saveAs || string.IsNullOrEmpty(path))
+            {
+                using (var dlg = new SaveFileDialog())
+                {
+                    dlg.Title = "Save Markdown file";
+                    dlg.FileName = Str(msg, "name");
+                    dlg.DefaultExt = "md";
+                    dlg.AddExtension = true;
+                    dlg.OverwritePrompt = true;
+                    dlg.Filter = "Markdown files|*.md;*.markdown;*.mdown;*.mkd;*.mdx"
+                               + "|Text files|*.txt|All files|*.*";
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        try { dlg.InitialDirectory = Path.GetDirectoryName(path); }
+                        catch (Exception) { }
+                    }
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;   // cancelled
+                    path = dlg.FileName;
+                }
+            }
+
+            try
+            {
+                // No BOM: the convention for Markdown, and what every other tool expects.
+                File.WriteAllText(path, text, new UTF8Encoding(false));
+
+                // Record our own write so the watcher does not echo it straight back.
+                try { _lastSeen[path] = File.GetLastWriteTimeUtc(path); } catch (Exception) { }
+                Watch(path);
+
+                long size = 0;
+                try { size = new FileInfo(path).Length; } catch (Exception) { }
+
+                Post(new Dictionary<string, object> {
+                    { "type", "saved" },
+                    { "docId", docId },
+                    { "fullPath", path },
+                    { "name", Path.GetFileName(path) },
+                    { "size", size }
+                });
+                Log.Write("saved " + path + " (" + size + " bytes)");
+            }
+            catch (Exception ex)
+            {
+                Log.Write("save failed for " + path + ": " + ex.Message);
+                Post(new Dictionary<string, object> {
+                    { "type", "saveError" }, { "docId", docId }, { "message", ex.Message } });
+            }
+        }
+
+        private static string Str(Dictionary<string, object> msg, string key)
+        {
+            object v;
+            if (!msg.TryGetValue(key, out v) || v == null) return null;
+            return Convert.ToString(v, CultureInfo.InvariantCulture);
         }
 
         private void Post(Dictionary<string, object> payload)
@@ -652,6 +723,21 @@ namespace MarkdownViewer
 
             Post(new Dictionary<string, object> {
                 { "type", "update" }, { "fullPath", fullPath }, { "text", text }, { "size", size } });
+        }
+
+        private void OnFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (_unsavedCount > 0 && e.CloseReason != CloseReason.WindowsShutDown)
+            {
+                DialogResult answer = MessageBox.Show(this,
+                    _unsavedCount == 1
+                        ? "One file has unsaved changes.\r\n\r\nClose without saving?"
+                        : _unsavedCount + " files have unsaved changes.\r\n\r\nClose without saving?",
+                    "Markdown Viewer",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                if (answer != DialogResult.Yes) { e.Cancel = true; return; }
+            }
+            WindowPlacement.Save(this);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
