@@ -1,0 +1,10 @@
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
+
+# Local tooling, not part of the app
+.claude/

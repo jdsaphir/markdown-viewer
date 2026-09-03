@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Markdown Viewer</title>
+<meta name="description" content="A lightweight local Markdown viewer: raw, rendered, or side by side.">
+<link rel="icon" href="assets/favicon.svg">
+<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="assets/markdown.css">
+<link rel="stylesheet" href="assets/highlight.css">
+<script>
+/* Resolve the theme before first paint so dark mode never flashes white. */
+(function () {
+  var t = 'auto';
+  try { t = JSON.parse(localStorage.getItem('mdv.theme')) || 'auto'; } catch (e) {}
+  var dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = t;
+  document.documentElement.dataset.resolved = dark ? 'dark' : 'light';
+})();
+</script>
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <!-- ========================= Sidebar ========================= -->
+  <aside class="sidebar" id="sidebar" aria-label="Files">
+    <div class="sidebar-head">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M6.5 22V10h3.2l3.3 5 3.3-5h3.2v12h-3.2v-6.7l-3.3 4.9-3.3-4.9V22zm17.2 0-4.4-5.6h2.8V10h3.2v6.4h2.8z"/></svg>
+        <span>Markdown&nbsp;Viewer</span>
+      </div>
+      <button class="icon-btn" id="btn-collapse" title="Hide sidebar (Ctrl+B)" aria-label="Hide sidebar">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg>
+      </button>
+    </div>
+
+    <div class="sidebar-actions">
+      <button class="btn" id="btn-open-files">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1.5H4a1.5 1.5 0 0 0-1.5 1.5v10A1.5 1.5 0 0 0 4 14.5h8a1.5 1.5 0 0 0 1.5-1.5V5.5z"/><path d="M9.5 1.5v4h4"/></svg>
+        Files
+      </button>
+      <button class="btn" id="btn-open-folder">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.75 12.75V3.75a1 1 0 0 1 1-1h3.1l1.4 1.6h6a1 1 0 0 1 1 1v7.4a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1z"/></svg>
+        Folder
+      </button>
+    </div>
+
+    <div class="filter-wrap">
+      <svg class="filter-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
+      <input type="search" id="file-filter" placeholder="Filter files..." autocomplete="off" spellcheck="false" aria-label="Filter files">
+    </div>
+
+    <nav class="file-list" id="file-list" aria-label="Open documents"></nav>
+
+    <div class="sidebar-foot">
+      <span id="file-count">No files</span>
+      <button class="link-btn" id="btn-clear" hidden>Clear</button>
+    </div>
+  </aside>
+
+  <!-- ========================= Main ========================= -->
+  <main class="main" id="main">
+
+    <header class="toolbar">
+      <button class="icon-btn toolbar-expand" id="btn-expand" title="Show sidebar (Ctrl+B)" aria-label="Show sidebar">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+      </button>
+
+      <div class="doc-title" id="doc-title"><span class="doc-name">No document</span></div>
+
+      <div class="spacer"></div>
+
+      <div class="segmented" id="segmented" role="group" aria-label="View mode">
+        <button data-view="raw" title="Raw markdown (1)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5.5 5-3 3 3 3M10.5 5l3 3-3 3"/></svg><span>Raw</span></button>
+        <button data-view="split" title="Side by side (2)"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M8 3v10"/></svg><span>Split</span></button>
+        <button data-view="rendered" title="Rendered (3)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h7M2.5 12h9"/></svg><span>Rendered</span></button>
+      </div>
+
+      <div class="toolbar-sep" aria-hidden="true"></div>
+
+      <button class="icon-btn" id="btn-outline" title="Outline (4)" aria-label="Toggle outline" aria-pressed="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h1M6 4h7M3 8h1M6 8h7M3 12h1M6 12h7"/></svg>
+      </button>
+      <button class="icon-btn theme-btn" id="btn-theme" title="Theme: auto" aria-label="Change theme">
+        <svg class="ico ico-auto" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" class="solid"/></svg>
+        <svg class="ico ico-light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.25"/><path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.95 3.05l-1.13 1.13M4.18 11.82l-1.13 1.13M12.95 12.95l-1.13-1.13M4.18 4.18 3.05 3.05"/></svg>
+        <svg class="ico ico-dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.7A5.8 5.8 0 0 1 6.3 2.5a5.8 5.8 0 1 0 7.2 7.2z"/></svg>
+      </button>
+    </header>
+
+    <!-- ========================= Panes ========================= -->
+    <div class="panes" id="panes" data-view="split">
+      <section class="pane pane-raw" id="pane-raw" aria-label="Raw markdown">
+        <div class="pane-scroll" id="raw-scroll">
+          <div class="raw-code" id="raw-code"></div>
+        </div>
+      </section>
+
+      <div class="gutter" id="gutter" role="separator" aria-orientation="vertical" tabindex="0"
+           aria-label="Resize panes" aria-valuemin="15" aria-valuemax="85" aria-valuenow="50"><div class="gutter-grip"></div></div>
+
+      <section class="pane pane-rendered" id="pane-rendered" aria-label="Rendered markdown">
+        <div class="pane-scroll" id="rendered-scroll">
+          <article class="markdown-body" id="rendered"></article>
+        </div>
+      </section>
+
+      <div class="empty" id="empty">
+        <div class="empty-card">
+          <svg class="empty-art" viewBox="0 0 120 92" aria-hidden="true">
+            <rect x="8" y="10" width="76" height="70" rx="7" class="sheet sheet-back"/>
+            <rect x="30" y="18" width="80" height="70" rx="7" class="sheet sheet-front"/>
+            <path d="M42 32h24" class="lines lines-title"/>
+            <path d="M42 46h56M42 56h56M42 66h34M42 76h46" class="lines"/>
+          </svg>
+          <h1>Drop a Markdown file here</h1>
+          <p class="empty-actions">
+            <button class="link-btn" id="empty-open">choose files</button>
+            <span class="dot">&middot;</span>
+            <button class="link-btn" id="empty-folder">open a folder</button>
+            <span class="dot">&middot;</span>
+            <button class="link-btn" id="empty-sample">see a sample</button>
+          </p>
+          <p class="empty-hint">or paste Markdown with <kbd>Ctrl</kbd><kbd>V</kbd></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========================= Status bar ========================= -->
+    <footer class="statusbar">
+      <span class="status-item" id="st-words">Ready</span>
+      <span class="status-item" id="st-lines"></span>
+      <span class="status-item" id="st-read"></span>
+      <div class="spacer"></div>
+      <button class="status-toggle is-on" id="btn-sync" title="Synchronise scrolling between panes" aria-pressed="true">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5 2.5 6 5 8.5M11 7.5 13.5 10 11 12.5"/><path d="M2.5 6h8a3 3 0 0 1 2.9 3.7M13.5 10h-8a3 3 0 0 1-2.9-3.7"/></svg>
+        <span>Sync</span>
+      </button>
+      <button class="status-toggle" id="btn-watch" hidden title="Reload automatically when the file changes on disk" aria-pressed="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.6 2v3.2h-3.2"/></svg>
+        <span>Auto-reload</span>
+      </button>
+      <button class="status-toggle" id="btn-print" title="Print the rendered document (or save it as PDF)">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.5v-4h7v4"/><path d="M3.5 6.5h9a1 1 0 0 1 1 1v3h-11v-3a1 1 0 0 1 1-1z"/><path d="M4.5 9.5h7v4h-7z"/></svg>
+        <span>Print</span>
+      </button>
+    </footer>
+  </main>
+
+  <!-- ========================= Outline ========================= -->
+  <aside class="outline" id="outline" aria-label="Document outline" hidden>
+    <div class="outline-head">
+      <span>Outline</span>
+      <button class="icon-btn" id="btn-outline-close" aria-label="Close outline">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></svg>
+      </button>
+    </div>
+    <nav class="outline-list" id="outline-list"></nav>
+  </aside>
+
+  <div class="drop-overlay" id="drop-overlay" hidden><div class="drop-inner">Drop to open</div></div>
+  <div class="toast" id="toast" hidden></div>
+</div>
+
+<input type="file" id="input-files" accept=".md,.markdown,.mdown,.mkd,.mdx,.txt,text/markdown" multiple hidden>
+<input type="file" id="input-folder" webkitdirectory directory multiple hidden>
+
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script src="vendor/highlight.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,116 @@
+/* ==========================================================================
+   Syntax highlighting — one theme, both colour schemes, driven by CSS vars
+   Token names follow highlight.js 11.x
+   ========================================================================== */
+
+:root {
+  --hl-comment:  #8d8880;
+  --hl-keyword:  #b0316b;
+  --hl-string:   #257a4a;
+  --hl-number:   #1359ad;
+  --hl-literal:  #1359ad;
+  --hl-function: #6b46c1;
+  --hl-type:     #a35c14;
+  --hl-attr:     #1359ad;
+  --hl-variable: #b4522f;
+  --hl-meta:     #8d8880;
+  --hl-punct:    #6d6a64;
+  --hl-add-bg:   #e2f4e8;
+  --hl-add-fg:   #1d6b3f;
+  --hl-del-bg:   #fbe6e4;
+  --hl-del-fg:   #b02a20;
+}
+
+:root[data-resolved="dark"] {
+  --hl-comment:  #8b857b;
+  --hl-keyword:  #f286ac;
+  --hl-string:   #86d3a2;
+  --hl-number:   #85bdf5;
+  --hl-literal:  #85bdf5;
+  --hl-function: #bd9df2;
+  --hl-type:     #e2ab6d;
+  --hl-attr:     #85bdf5;
+  --hl-variable: #eb9573;
+  --hl-meta:     #8b857b;
+  --hl-punct:    #a7a29a;
+  --hl-add-bg:   #16351f;
+  --hl-add-fg:   #86d3a2;
+  --hl-del-bg:   #3a1c1a;
+  --hl-del-fg:   #f0938a;
+}
+
+/* --- Core tokens ---------------------------------------------------------- */
+.hljs-comment,
+.hljs-quote            { color: var(--hl-comment); font-style: italic; }
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-doctag,
+.hljs-formula          { color: var(--hl-keyword); }
+
+.hljs-string,
+.hljs-regexp,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-addition         { color: var(--hl-string); }
+
+.hljs-number,
+.hljs-literal,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-template-variable { color: var(--hl-number); }
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-section          { color: var(--hl-function); font-weight: 500; }
+
+.hljs-title.class_,
+.hljs-type,
+.hljs-built_in,
+.hljs-symbol,
+.hljs-name             { color: var(--hl-type); }
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-params           { color: var(--hl-attr); }
+
+.hljs-variable,
+.hljs-subst,
+.hljs-operator,
+.hljs-char.escape_     { color: var(--hl-variable); }
+
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-comment .hljs-doctag { color: var(--hl-meta); }
+
+.hljs-punctuation,
+.hljs-bullet           { color: var(--hl-punct); }
+
+.hljs-link             { color: var(--hl-number); text-decoration: underline; }
+.hljs-emphasis         { font-style: italic; }
+.hljs-strong           { font-weight: 650; }
+
+.hljs-addition { background: var(--hl-add-bg); color: var(--hl-add-fg); display: inline-block; width: 100%; }
+.hljs-deletion { background: var(--hl-del-bg); color: var(--hl-del-fg); display: inline-block; width: 100%; }
+
+/* --- Raw pane: tuned for reading Markdown source -------------------------- */
+.raw-code .hljs-section {
+  color: var(--accent);
+  font-weight: 650;
+}
+.raw-code .hljs-bullet,
+.raw-code .hljs-symbol {
+  color: var(--accent);
+  font-weight: 600;
+}
+.raw-code .hljs-quote { color: var(--text-mute); font-style: normal; }
+.raw-code .hljs-code {
+  color: var(--hl-string);
+  background: color-mix(in srgb, var(--hl-string) 8%, transparent);
+  border-radius: 3px;
+}
+.raw-code .hljs-strong { color: var(--text); font-weight: 700; }
+.raw-code .hljs-emphasis { color: var(--text); }
+.raw-code .hljs-link { color: var(--hl-number); text-decoration: none; }
+.raw-code .hljs-string { color: var(--hl-number); }
