@@ -572,7 +572,12 @@ namespace MarkdownViewer
                     { "type", "notice" }, { "text", "No Markdown files in that folder" } });
                 return;
             }
-            SendFiles(found, true);
+
+            // Keep the chosen folder's own name, wherever its files actually sit.
+            string parent = null;
+            try { parent = Path.GetDirectoryName(folder.TrimEnd('\\', '/')); }
+            catch (Exception) { }
+            SendFiles(found, true, string.IsNullOrEmpty(parent) ? folder : parent);
         }
 
         private static void CollectMarkdown(string dir, List<string> into, int depth)
@@ -594,10 +599,35 @@ namespace MarkdownViewer
             catch (IOException) { }
         }
 
-        /// <summary>Reads files, sends them to the page, and starts watching them.</summary>
         private void SendFiles(List<string> paths, bool activate)
         {
-            string root = CommonRoot(paths);
+            SendFiles(paths, activate, null);
+        }
+
+        /// <summary>
+        /// Reads files, sends them to the page, and starts watching them.
+        ///
+        /// Paths are made relative to the folder *containing* the batch, so an
+        /// opened folder keeps its own name in the sidebar and files in
+        /// subfolders read as folder/subfolder. Pass containingFolder when the
+        /// user picked a specific folder: the files inside might all sit in one
+        /// subfolder, and their common root would otherwise lose the name of the
+        /// folder that was actually chosen. A lone file keeps just its filename
+        /// and so stays ungrouped.
+        /// </summary>
+        private void SendFiles(List<string> paths, bool activate, string containingFolder)
+        {
+            string basis = containingFolder;
+            if (basis == null)
+            {
+                basis = CommonRoot(paths);
+                if (basis != null && paths.Count > 1)
+                {
+                    string parent = Path.GetDirectoryName(basis);
+                    if (!string.IsNullOrEmpty(parent)) basis = parent;
+                }
+            }
+
             var payload = new List<object>();
 
             foreach (string p in paths)
@@ -607,8 +637,8 @@ namespace MarkdownViewer
                 catch (Exception) { continue; }
 
                 string rel = p;
-                if (root != null && p.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-                    rel = p.Substring(root.Length).TrimStart('\\', '/');
+                if (basis != null && p.StartsWith(basis, StringComparison.OrdinalIgnoreCase))
+                    rel = p.Substring(basis.Length).TrimStart('\\', '/');
 
                 payload.Add(new Dictionary<string, object> {
                     { "path", rel.Replace('\\', '/') },

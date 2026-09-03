@@ -161,10 +161,11 @@ written for you by Claude — look the way they were meant to look.
 - **Paste** Markdown straight from the clipboard with <kbd>Ctrl</kbd>+<kbd>V</kbd>
 - Pass a path on the command line (desktop app)
 
-Opening a folder loads every Markdown file in it, grouped by directory in the
-sidebar, with a filter box for finding one quickly. Relative image links and
-relative links between documents both resolve, so a folder of notes browses like
-a small wiki.
+Opening a folder loads every Markdown file in it, grouped by folder in the
+sidebar: the folder you picked keeps its own name, and anything nested reads as
+`folder/subfolder`. A single file stays ungrouped. There is a filter box for
+finding one quickly, and relative image links and relative links between
+documents both resolve, so a folder of notes browses like a small wiki.
 
 To close one file, hover it in the sidebar and click the **×** on its right.
 The × on a folder heading closes that whole group, and **Clear** in the footer
