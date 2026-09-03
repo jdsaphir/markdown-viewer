@@ -821,24 +821,70 @@ function renderFileList() {
       + '</mark>' + escapeHtml(name.slice(i + query.length));
   };
 
+  const closeIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></svg>';
   let html = '';
+
   for (const [dir, items] of groups) {
-    if (groups.size > 1 || dir) html += `<div class="file-group" title="${escapeHtml(dir || 'Loose files')}">${escapeHtml(dir || 'Loose files')}</div>`;
+    const label = dir || 'Loose files';
+    if (groups.size > 1 || dir) {
+      html += `<div class="file-group">`
+        + `<span class="file-group-name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`
+        + `<button class="file-close" data-ids="${items.map((d) => d.id).join(',')}"`
+        + ` title="Close these files" aria-label="Close every file in ${escapeHtml(label)}">${closeIcon}</button>`
+        + `</div>`;
+    }
     for (const d of items) {
       const dirty = isDirty(d);
-      html += `<button class="file-item${d.id === state.activeId ? ' is-active' : ''}" data-id="${d.id}"`
+      html += `<div class="file-item${d.id === state.activeId ? ' is-active' : ''}">`
+        + `<button class="file-open" data-id="${d.id}"`
         + ` title="${escapeHtml(d.path)}${dirty ? ' (unsaved changes)' : ''}">`
         + `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.3 1.8H4.2a1.4 1.4 0 0 0-1.4 1.4v9.6a1.4 1.4 0 0 0 1.4 1.4h7.6a1.4 1.4 0 0 0 1.4-1.4V5.6z"/><path d="M9.3 1.8v3.8h3.9"/></svg>`
         + `<span class="name">${highlight(d.name)}</span>`
         + (dirty ? '<span class="file-dirty" aria-label="Unsaved changes">*</span>' : '')
-        + `</button>`;
+        + `</button>`
+        + `<button class="file-close" data-ids="${d.id}"`
+        + ` title="Close ${escapeHtml(d.name)}" aria-label="Close ${escapeHtml(d.name)}">${closeIcon}</button>`
+        + `</div>`;
     }
   }
   list.innerHTML = html;
 
-  list.querySelectorAll('.file-item').forEach((btn) => {
+  list.querySelectorAll('.file-open').forEach((btn) => {
     btn.addEventListener('click', () => showDoc(btn.dataset.id));
   });
+  list.querySelectorAll('.file-close').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeDocs(btn.dataset.ids.split(','));
+    });
+  });
+}
+
+/** Closes one document, or every document in a folder group. */
+function closeDocs(ids) {
+  const docs = ids.map((id) => state.docs.find((d) => d.id === id)).filter(Boolean);
+  if (!docs.length) return;
+
+  const unsaved = docs.filter(isDirty);
+  if (unsaved.length && !window.confirm(
+      (unsaved.length === 1
+        ? unsaved[0].name + ' has unsaved changes.'
+        : unsaved.length + ' of these files have unsaved changes.')
+      + '\n\nClose without saving?')) return;
+
+  const wasActive = docs.some((d) => d.id === state.activeId);
+  const position = state.docs.indexOf(docs[0]);
+
+  for (const doc of docs) {
+    if (doc.fullPath) hostSend({ type: 'unwatch', fullPath: doc.fullPath });
+    const at = state.docs.indexOf(doc);
+    if (at !== -1) state.docs.splice(at, 1);
+  }
+
+  if (!state.docs.length) { state.assets.clear(); resetToEmpty(); return; }
+  // Land on whatever took the closed document's place, else the new last one.
+  if (wasActive) showDoc(state.docs[Math.min(position, state.docs.length - 1)].id);
+  else refreshDirty();
 }
 
 function clearDocs() {
@@ -846,10 +892,19 @@ function clearDocs() {
   if (unsaved && !window.confirm(
       unsaved + (unsaved === 1 ? ' file has' : ' files have') + ' unsaved changes.\n\nClose them anyway?')) return;
 
-  revokeObjectUrls();
-  stopWatch();
+  for (const doc of state.docs) {
+    if (doc.fullPath) hostSend({ type: 'unwatch', fullPath: doc.fullPath });
+  }
   state.docs = [];
   state.assets.clear();
+  resetToEmpty();
+}
+
+/** Returns the UI to the empty state. Assumes state.docs is already settled. */
+function resetToEmpty() {
+  revokeObjectUrls();
+  stopWatch();
+  if (find.open) closeFind();
   state.activeId = null;
   renderedEl.innerHTML = '';
   rawEl.innerHTML = '';

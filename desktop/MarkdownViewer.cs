@@ -441,6 +441,7 @@ namespace MarkdownViewer
                 case "openFiles": ShowOpenFiles(); break;
                 case "openFolder": ShowOpenFolder(); break;
                 case "unwatchAll": StopWatching(); break;
+                case "unwatch": Unwatch(Str(msg, "fullPath")); break;
                 case "save": SaveDocument(msg, false); break;
                 case "saveAs": SaveDocument(msg, true); break;
                 case "dirtyState":
@@ -657,6 +658,20 @@ namespace MarkdownViewer
                 _watchers[fullPath] = w;
             }
             catch (Exception) { /* unwatchable location; the document still opens */ }
+        }
+
+        /// <summary>Drops the watcher for one file, once the page has closed it.</summary>
+        private void Unwatch(string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath)) return;
+            FileSystemWatcher watcher;
+            if (_watchers.TryGetValue(fullPath, out watcher))
+            {
+                try { watcher.EnableRaisingEvents = false; watcher.Dispose(); }
+                catch (Exception) { }
+                _watchers.Remove(fullPath);
+            }
+            _lastSeen.Remove(fullPath);
         }
 
         private void StopWatching()

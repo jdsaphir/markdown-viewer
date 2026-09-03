@@ -166,6 +166,10 @@ sidebar, with a filter box for finding one quickly. Relative image links and
 relative links between documents both resolve, so a folder of notes browses like
 a small wiki.
 
+To close one file, hover it in the sidebar and click the **×** on its right.
+The × on a folder heading closes that whole group, and **Clear** in the footer
+closes everything. Anything with unsaved changes asks before it goes.
+
 ### Auto-reload
 
 In the desktop app this is on by default: edit a file in your editor and the
