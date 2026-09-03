@@ -371,6 +371,45 @@ function splitHighlightedLines(html) {
   return lines;
 }
 
+/**
+ * Wraps <mark> around the given plain-text column ranges inside a line of
+ * already-highlighted HTML. Tags and entities are stepped over so the offsets
+ * stay in the text's own coordinates, and a mark is closed and reopened around
+ * any tag it straddles so the result is always well nested.
+ */
+function injectMarks(html, ranges) {
+  // One entity is one text column. highlight.js emits &#x27; for apostrophes and
+  // escapeHtml emits &#39;, so hex and decimal forms both have to be recognised
+  // or every mark after a quote on the line lands in the wrong place.
+  const token = /<[^>]+>|&[a-zA-Z][a-zA-Z0-9]*;|&#\d+;|&#[xX][0-9a-fA-F]+;|[\s\S]/g;
+  let out = '';
+  let col = 0;
+  let ri = 0;
+  let openTag = '';
+  let m;
+
+  while ((m = token.exec(html)) !== null) {
+    const piece = m[0];
+
+    if (piece.charAt(0) === '<') {
+      out += openTag ? '</mark>' + piece + openTag : piece;
+      continue;
+    }
+
+    if (openTag && col >= ranges[ri].end) { out += '</mark>'; openTag = ''; ri++; }
+    while (ri < ranges.length && ranges[ri].end <= col) ri++;
+    if (!openTag && ri < ranges.length && col >= ranges[ri].start) {
+      openTag = ranges[ri].current ? '<mark class="is-current">' : '<mark>';
+      out += openTag;
+    }
+
+    out += piece;
+    col++;
+  }
+
+  return out + (openTag ? '</mark>' : '');
+}
+
 function renderRaw(src) {
   let html;
   if (src.length > RAW_HIGHLIGHT_LIMIT) {
@@ -379,10 +418,37 @@ function renderRaw(src) {
     try { html = hljs.highlight(src, { language: 'markdown', ignoreIllegals: true }).value; }
     catch (_) { html = escapeHtml(src); }
   }
+
   const lines = splitHighlightedLines(html);
+  const srcLines = src.split('\n');
   const frag = [];
+  let offset = 0;
+  let mi = 0;                       // walks the sorted match list alongside the lines
+
   for (let i = 0; i < lines.length; i++) {
-    frag.push(`<div class="raw-line"><span class="n">${i + 1}</span><span class="t">${lines[i] || ''}</span></div>`);
+    const lineText = srcLines[i] || '';
+    const lineStart = offset;
+    const lineEnd = lineStart + lineText.length;
+    offset = lineEnd + 1;           // + the newline
+
+    let body = lines[i] || '';
+
+    if (searchMatches.length) {
+      while (mi < searchMatches.length && searchMatches[mi].end <= lineStart) mi++;
+      const ranges = [];
+      for (let k = mi; k < searchMatches.length && searchMatches[k].start < lineEnd; k++) {
+        const hit = searchMatches[k];
+        if (hit.end <= lineStart) continue;
+        ranges.push({
+          start: Math.max(0, hit.start - lineStart),
+          end: Math.min(lineText.length, hit.end - lineStart),
+          current: k === searchIndex
+        });
+      }
+      if (ranges.length) body = injectMarks(body, ranges);
+    }
+
+    frag.push(`<div class="raw-line"><span class="n">${i + 1}</span><span class="t">${body}</span></div>`);
   }
   rawEl.innerHTML = frag.join('');
 }
@@ -676,6 +742,7 @@ function showDoc(id) {
   $('#raw-scroll').scrollTop = 0;
   $('#rendered-scroll').scrollTop = 0;
 
+  if (find.open) runSearch(false);   // matches belong to the document, not the app
   renderFileList();
   setupWatch();
 }
@@ -1415,6 +1482,7 @@ function initEditor() {
     schedulePreview();
     updateCaretStatus();
     refreshDirty();
+    if (find.open) runSearch(true);   // offsets shift as the text changes
   });
 
   editorInput.addEventListener('keydown', (e) => {
@@ -1442,6 +1510,270 @@ function initEditor() {
 
   $('#btn-save').addEventListener('click', () => saveActive(false));
   $('#btn-save-as').addEventListener('click', () => saveActive(true));
+}
+
+/* ======================================================================
+   Find and replace
+
+   Matches are found in the textarea's own text, then drawn as <mark>s in the
+   highlighted mirror underneath it. Replacements go through insertText so
+   they land on the browser's undo stack like any other edit.
+   ====================================================================== */
+
+let searchMatches = [];      // sorted, non-overlapping [{start, end}] in text offsets
+let searchIndex = -1;        // which one is the current match
+const MAX_MATCHES = 20000;
+
+const find = {
+  bar: null, input: null, replaceInput: null, count: null,
+  caseSensitive: false, wholeWord: false, regex: false,
+  open: false
+};
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildPattern() {
+  const raw = find.input.value;
+  if (!raw) return null;
+  let source = find.regex ? raw : escapeRegExp(raw);
+  if (find.wholeWord) source = '\\b(?:' + source + ')\\b';
+  // 'm' so ^ and $ anchor to lines, which is what a find bar is expected to do.
+  const flags = 'gm' + (find.caseSensitive ? '' : 'i');
+  try { return new RegExp(source, flags + 'u'); }
+  catch (_) {
+    // 'u' rejects some patterns that are legal without it; fall back before failing.
+    try { return new RegExp(source, flags); }
+    catch (__) { return undefined; }   // undefined = invalid, null = empty
+  }
+}
+
+/** Recomputes every match. Keeps the current one if it still exists. */
+function runSearch(keepIndex) {
+  const previous = searchIndex >= 0 && searchMatches[searchIndex]
+    ? searchMatches[searchIndex].start : -1;
+
+  searchMatches = [];
+  const re = buildPattern();
+
+  if (re === undefined) {
+    find.bar.classList.add('no-match');
+    find.count.textContent = 'Bad pattern';
+    searchIndex = -1;
+    scheduleMirror();
+    updateFindButtons();
+    return;
+  }
+
+  if (re) {
+    const text = editorInput.value;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (m[0] === '') { re.lastIndex++; continue; }   // guard zero-width patterns
+      searchMatches.push({ start: m.index, end: m.index + m[0].length });
+      if (searchMatches.length >= MAX_MATCHES) break;
+    }
+  }
+
+  if (!searchMatches.length) {
+    searchIndex = -1;
+  } else if (keepIndex && previous >= 0) {
+    let at = searchMatches.findIndex((h) => h.start >= previous);
+    searchIndex = at === -1 ? 0 : at;
+  } else {
+    const from = editorInput.selectionStart;
+    let at = searchMatches.findIndex((h) => h.start >= from);
+    searchIndex = at === -1 ? 0 : at;
+  }
+
+  find.bar.classList.toggle('no-match', !!find.input.value && !searchMatches.length);
+  updateFindCount();
+  updateFindButtons();
+  scheduleMirror();
+}
+
+function updateFindCount() {
+  if (!find.input.value) { find.count.textContent = 'No results'; return; }
+  if (!searchMatches.length) { find.count.textContent = 'No results'; return; }
+  const capped = searchMatches.length >= MAX_MATCHES ? '+' : '';
+  find.count.textContent = (searchIndex + 1) + ' of ' + searchMatches.length + capped;
+}
+
+function updateFindButtons() {
+  const none = searchMatches.length === 0;
+  $('#find-prev').disabled = none;
+  $('#find-next').disabled = none;
+  $('#replace-one').disabled = none;
+  $('#replace-all').disabled = none;
+}
+
+/** Puts the current match on screen and leaves the caret on it. */
+function revealMatch() {
+  const hit = searchMatches[searchIndex];
+  if (!hit) return;
+
+  editorInput.setSelectionRange(hit.start, hit.end);
+
+  const before = editorInput.value.slice(0, hit.start);
+  const line = before.length - before.replace(/\n/g, '').length;
+  const row = rawEl.children[line];
+  if (!row) return;
+
+  const scroller = $('#raw-scroll');
+  const top = row.offsetTop;
+  const bottom = top + row.offsetHeight;
+  // Clear the find bar itself, which floats over the top of the pane.
+  const margin = find.open ? find.bar.offsetHeight + 22 : 60;
+  if (top < scroller.scrollTop + margin) {
+    scroller.scrollTop = Math.max(0, top - margin);
+  } else if (bottom > scroller.scrollTop + scroller.clientHeight - margin) {
+    scroller.scrollTop = bottom - scroller.clientHeight + margin;
+  }
+}
+
+function stepMatch(delta) {
+  if (!searchMatches.length) return;
+  searchIndex = (searchIndex + delta + searchMatches.length) % searchMatches.length;   // wraps around
+  updateFindCount();
+  renderRaw(editorInput.value);   // synchronous: revealMatch needs live geometry
+  markCaretLine();
+  revealMatch();
+}
+
+function replaceCurrent() {
+  const hit = searchMatches[searchIndex];
+  if (!hit) return;
+  const doc = activeDoc();
+  if (!doc) return;
+
+  editorInput.focus();
+  editorInput.setSelectionRange(hit.start, hit.end);
+  insertText(find.replaceInput.value);
+
+  doc.text = editorInput.value;
+  refreshDirty();
+  schedulePreview();
+  runSearch(true);
+  renderRaw(editorInput.value);
+  revealMatch();
+}
+
+function replaceAll() {
+  if (!searchMatches.length) return;
+  const doc = activeDoc();
+  if (!doc) return;
+
+  const replacement = find.replaceInput.value;
+  const text = editorInput.value;
+  let out = '';
+  let at = 0;
+  for (const hit of searchMatches) {
+    out += text.slice(at, hit.start) + replacement;
+    at = hit.end;
+  }
+  out += text.slice(at);
+
+  const total = searchMatches.length;
+  const caret = editorInput.selectionStart;
+
+  // One select-all + insert keeps the whole thing as a single undo step.
+  editorInput.focus();
+  editorInput.select();
+  insertText(out);
+  editorInput.setSelectionRange(Math.min(caret, out.length), Math.min(caret, out.length));
+
+  doc.text = editorInput.value;
+  refreshDirty();
+  schedulePreview();
+  runSearch(false);
+  toast('Replaced ' + total + (total === 1 ? ' match' : ' matches'));
+}
+
+function openFind(withReplace) {
+  if (!activeDoc()) return;
+  if (state.view === 'rendered') setView('split');
+
+  find.open = true;
+  find.bar.hidden = false;
+  if (withReplace) setReplaceVisible(true);
+
+  // Seed from the selection, the way every other editor does.
+  const selection = editorInput.value.slice(editorInput.selectionStart, editorInput.selectionEnd);
+  if (selection && selection.length <= 200 && selection.indexOf('\n') === -1) {
+    find.input.value = selection;
+  }
+  find.input.focus();
+  find.input.select();
+  runSearch(false);
+  if (searchMatches.length) { renderRaw(editorInput.value); revealMatch(); }
+}
+
+function closeFind() {
+  find.open = false;
+  find.bar.hidden = true;
+  find.bar.classList.remove('no-match');
+  searchMatches = [];
+  searchIndex = -1;
+  scheduleMirror();
+  editorInput.focus();
+}
+
+function setReplaceVisible(visible) {
+  $('#find-replace-row').hidden = !visible;
+  $('#find-toggle').setAttribute('aria-expanded', String(visible));
+}
+
+function toggleOption(name, button) {
+  find[name] = !find[name];
+  button.setAttribute('aria-pressed', String(find[name]));
+  runSearch(true);
+}
+
+function initFind() {
+  find.bar = $('#findbar');
+  find.input = $('#find-input');
+  find.replaceInput = $('#replace-input');
+  find.count = $('#find-count');
+
+  find.input.addEventListener('input', () => {
+    runSearch(false);
+    // Jump to the first hit as you type, the way a find bar is expected to.
+    if (searchMatches.length) { renderRaw(editorInput.value); revealMatch(); }
+  });
+
+  find.bar.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFind(); return; }
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.target === find.replaceInput) { replaceCurrent(); return; }
+      stepMatch(e.shiftKey ? -1 : 1);
+      return;
+    }
+
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'c') { e.preventDefault(); toggleOption('caseSensitive', $('#find-case')); return; }
+      if (k === 'w') { e.preventDefault(); toggleOption('wholeWord', $('#find-word')); return; }
+      if (k === 'r') { e.preventDefault(); toggleOption('regex', $('#find-regex')); return; }
+    }
+  });
+
+  $('#find-next').addEventListener('click', () => stepMatch(1));
+  $('#find-prev').addEventListener('click', () => stepMatch(-1));
+  $('#find-close').addEventListener('click', closeFind);
+  $('#find-toggle').addEventListener('click', () => {
+    setReplaceVisible($('#find-replace-row').hidden);
+    if (!$('#find-replace-row').hidden) find.replaceInput.focus();
+  });
+  $('#find-case').addEventListener('click', (e) => toggleOption('caseSensitive', e.currentTarget));
+  $('#find-word').addEventListener('click', (e) => toggleOption('wholeWord', e.currentTarget));
+  $('#find-regex').addEventListener('click', (e) => toggleOption('regex', e.currentTarget));
+  $('#replace-one').addEventListener('click', replaceCurrent);
+  $('#replace-all').addEventListener('click', replaceAll);
+
+  updateFindButtons();
 }
 
 /* ======================================================================
@@ -1657,6 +1989,16 @@ function initEvents() {
     const typing = tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable;
     const mod = e.ctrlKey || e.metaKey;
 
+    if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); openFind(false); return; }
+    if (mod && e.key.toLowerCase() === 'h') { e.preventDefault(); openFind(true); return; }
+    if (e.key === 'F3') {
+      e.preventDefault();
+      if (find.open) stepMatch(e.shiftKey ? -1 : 1); else openFind(false);
+      return;
+    }
+    // The find bar's own inputs stop Escape before it reaches here; the file
+    // filter handles its own. That leaves the editor, where Escape should close.
+    if (e.key === 'Escape' && find.open && tag !== 'INPUT') { e.preventDefault(); closeFind(); return; }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveActive(e.shiftKey); return; }
     if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); pickFiles(); return; }
     if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); return; }
@@ -1702,6 +2044,7 @@ function init() {
   initGutter();
   initScrollSync();
   initEditor();
+  initFind();
   initEvents();
   refreshDirty();
   renderFileList();

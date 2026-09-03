@@ -99,6 +99,21 @@ rendered side follows a moment later.
   indentation. Pressing it on an empty item ends the list instead.
 - The status bar shows **line and column**, and the selected character count.
 
+### Find and replace
+
+<kbd>Ctrl</kbd>+<kbd>F</kbd> opens find, <kbd>Ctrl</kbd>+<kbd>H</kbd> opens it with
+replace. Every match is highlighted in the source at once, with the current one
+picked out, and the count reads `3 of 17`.
+
+- <kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd> (or <kbd>F3</kbd>) step
+  through matches, wrapping around at the ends. <kbd>Esc</kbd> closes.
+- **Match case** (<kbd>Alt</kbd>+<kbd>C</kbd>), **whole word**
+  (<kbd>Alt</kbd>+<kbd>W</kbd>) and **regular expression**
+  (<kbd>Alt</kbd>+<kbd>R</kbd>) — in regex mode `^` and `$` anchor to lines.
+- **Replace** changes the current match; **All** does the lot as a single undo
+  step, so one <kbd>Ctrl</kbd>+<kbd>Z</kbd> takes it all back.
+- Opening find with text selected searches for that text.
+
 Nothing is written until you ask for it, and nothing overwrites your work:
 
 - Closing with unsaved changes asks first.
@@ -166,6 +181,8 @@ status bar.
 | --- | --- |
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Save as… |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>H</kbd> | Find / find and replace |
+| <kbd>F3</kbd> / <kbd>Shift</kbd>+<kbd>F3</kbd> | Next / previous match |
 | <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | Indent / outdent (in the editor) |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> | Undo / redo (in the editor) |
 | <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Raw / Split / Rendered |
