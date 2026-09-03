@@ -94,7 +94,7 @@ const state = {
   split: store.get('split', 50),
   theme: store.get('theme', 'auto'),
   sync: store.get('sync', true),
-  watching: false,
+  watching: store.get('watch', false),
   watchTimer: null,
   mermaidTheme: null,
   seq: 0
@@ -636,6 +636,13 @@ function updateOutlineActive() {
    Documents
    ====================================================================== */
 
+function updateStats(doc) {
+  const s = statsFor(doc.text);
+  $('#st-words').textContent = s.words.toLocaleString() + (s.words === 1 ? ' word' : ' words');
+  $('#st-lines').textContent = s.lines.toLocaleString() + ' lines · ' + formatBytes(doc.size);
+  $('#st-read').textContent = '~' + s.minutes + ' min read';
+}
+
 function statsFor(text) {
   const words = (text.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) || []).length;
   const lines = text.split('\n').length;
@@ -660,10 +667,7 @@ function showDoc(id) {
   renderRaw(doc.text);
   renderMarkdown(doc.text);
 
-  const s = statsFor(doc.text);
-  $('#st-words').textContent = s.words.toLocaleString() + (s.words === 1 ? ' word' : ' words');
-  $('#st-lines').textContent = s.lines.toLocaleString() + ' lines · ' + formatBytes(doc.size);
-  $('#st-read').textContent = '~' + s.minutes + ' min read';
+  updateStats(doc);
 
   $('#raw-scroll').scrollTop = 0;
   $('#rendered-scroll').scrollTop = 0;
@@ -678,7 +682,7 @@ function addDocs(entries, { activate = true, quiet = false } = {}) {
 
   for (const e of entries) {
     const path = e.path || e.name;
-    const existing = state.docs.find((d) => d.path === path);
+    const existing = state.docs.find((d) => (e.fullPath ? d.fullPath === e.fullPath : d.path === path));
     const slash = path.lastIndexOf('/');
     const doc = {
       id: existing ? existing.id : 'd' + (state.seq++),
@@ -688,6 +692,7 @@ function addDocs(entries, { activate = true, quiet = false } = {}) {
       text: e.text,
       size: e.size != null ? e.size : new Blob([e.text]).size,
       handle: e.handle || null,
+      fullPath: e.fullPath || null,
       lastModified: e.lastModified || 0
     };
     if (existing) Object.assign(existing, doc);
@@ -812,6 +817,7 @@ async function ingestHandles(items) {
 }
 
 async function pickFiles() {
+  if (host) { hostSend({ type: 'openFiles' }); return; }
   if (hasFsa) {
     try {
       const handles = await window.showOpenFilePicker({
@@ -830,6 +836,7 @@ async function pickFiles() {
 }
 
 async function pickFolder() {
+  if (host) { hostSend({ type: 'openFolder' }); return; }
   if (typeof window.showDirectoryPicker === 'function') {
     try {
       const dir = await window.showDirectoryPicker();
@@ -927,6 +934,69 @@ async function handleDrop(dt) {
   toast('Nothing to open');
 }
 
+/* ======================================================================
+   Desktop shell bridge
+   When running inside MarkdownViewer.exe, the host owns the file dialogs and
+   watches files natively, so no local server (and no polling) is needed.
+   ====================================================================== */
+
+const host = (window.chrome && window.chrome.webview) ? window.chrome.webview : null;
+
+function hostSend(msg) {
+  if (host) host.postMessage(msg);
+}
+
+/** Re-render the active document from its current text, holding scroll position. */
+function rerenderActive() {
+  const doc = activeDoc();
+  if (!doc) return;
+  const rendered = getScrollRatio($('#rendered-scroll'));
+  const raw = getScrollRatio($('#raw-scroll'));
+  renderRaw(doc.text);
+  renderMarkdown(doc.text);
+  updateStats(doc);
+  doc.dirty = false;
+  requestAnimationFrame(() => {
+    setScrollRatio($('#rendered-scroll'), rendered);
+    setScrollRatio($('#raw-scroll'), raw);
+  });
+}
+
+if (host) {
+  document.documentElement.classList.add('is-desktop');
+  state.watching = store.get('watch', true);   // the whole point of the desktop shell
+
+  host.addEventListener('message', (e) => {
+    const msg = e.data;
+    if (!msg || !msg.type) return;
+
+    if (msg.type === 'open') {
+      const entries = msg.files.map((f) => ({
+        path: f.path,
+        text: f.text,
+        size: f.size,
+        fullPath: f.fullPath
+      }));
+      addDocs(entries, { activate: msg.activate !== false });
+      return;
+    }
+
+    if (msg.type === 'update') {
+      const doc = state.docs.find((d) => d.fullPath === msg.fullPath);
+      if (!doc) return;
+      doc.text = msg.text;
+      if (msg.size != null) doc.size = msg.size;
+      if (doc.id !== state.activeId) return;   // picked up when it is opened
+      if (!state.watching) { doc.dirty = true; return; }
+      rerenderActive();
+      toast('Reloaded ' + doc.name);
+      return;
+    }
+
+    if (msg.type === 'notice') { toast(msg.text); return; }
+  });
+}
+
 /* --- auto-reload -------------------------------------------------------- */
 function stopWatch() {
   clearInterval(state.watchTimer);
@@ -937,6 +1007,17 @@ function setupWatch() {
   stopWatch();
   const doc = activeDoc();
   const btn = $('#btn-watch');
+
+  if (host) {
+    // The host watches every file it opened and pushes changes; the toggle
+    // only decides whether the page acts on them.
+    btn.hidden = !(doc && doc.fullPath);
+    btn.classList.toggle('is-on', state.watching);
+    btn.setAttribute('aria-pressed', String(state.watching));
+    if (state.watching && doc && doc.dirty) { rerenderActive(); toast('Reloaded ' + doc.name); }
+    return;
+  }
+
   btn.hidden = !(doc && doc.handle);
   if (!doc || !doc.handle) return;
 
@@ -956,10 +1037,7 @@ function setupWatch() {
       current.lastModified = file.lastModified;
       renderRaw(current.text);
       renderMarkdown(current.text);
-      const s = statsFor(current.text);
-      $('#st-words').textContent = s.words.toLocaleString() + ' words';
-      $('#st-lines').textContent = s.lines.toLocaleString() + ' lines · ' + formatBytes(current.size);
-      $('#st-read').textContent = '~' + s.minutes + ' min read';
+      updateStats(current);
       requestAnimationFrame(() => setScrollRatio($('#rendered-scroll'), scrollRatio));
       toast('Reloaded ' + current.name);
     } catch (_) { /* file busy or removed; try again next tick */ }
@@ -1118,6 +1196,7 @@ function initEvents() {
   });
   $('#btn-watch').addEventListener('click', () => {
     state.watching = !state.watching;
+    store.set('watch', state.watching);
     setupWatch();
     toast('Auto-reload ' + (state.watching ? 'on' : 'off'));
   });

@@ -8,3 +8,8 @@ desktop.ini
 
 # Local tooling, not part of the app
 .claude/
+
+# Build output
+MarkdownViewer.exe
+desktop/lib/
+desktop/obj/
