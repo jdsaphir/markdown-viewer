@@ -36,6 +36,11 @@ Because it accepts a file argument, you can make it the default app for `.md`
 files (right-click a `.md` → *Open with* → *Choose another app*) and just
 double-click your way in.
 
+Opening several files that way fills **one** window rather than spawning a
+window each: later launches hand their arguments to the instance already
+running and exit, so the files pile up in the sidebar. Pass `--new-window` when
+you actually want a second window.
+
 ### Why the desktop app is the better way to run it
 
 | | Desktop app | Browser (`file://`) |

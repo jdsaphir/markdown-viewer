@@ -43,6 +43,12 @@ namespace MarkdownViewer
         {
             // Both hooks must be in place before any WebView2 type is resolved.
             AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
+
+            // Opening several files from Explorer should fill one window, not
+            // spawn a window each. --new-window opts out.
+            if (Array.IndexOf(args, "--new-window") < 0
+                && SingleInstance.ForwardToRunningInstance(args)) return;
+
             NativeLibraries.Prepare();
             Launch(args);
         }
@@ -229,8 +235,11 @@ namespace MarkdownViewer
     internal sealed class MainForm : Form
     {
         private readonly WebView2 _web = new WebView2();
-        private readonly string[] _startupArgs;
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer();
+
+        // Files waiting to be handed to the page, either from the command line
+        // or forwarded here by a second instance.
+        private readonly List<string> _pending = new List<string>();
 
         // Watched documents, keyed by full path (case-insensitive).
         private readonly Dictionary<string, FileSystemWatcher> _watchers =
@@ -243,7 +252,7 @@ namespace MarkdownViewer
 
         internal MainForm(string[] args)
         {
-            _startupArgs = args;
+            QueueFiles(args);
             _json.MaxJsonLength = int.MaxValue;
 
             Text = "Markdown Viewer";
@@ -368,19 +377,59 @@ namespace MarkdownViewer
             _ready = true;
 
             Post(new Dictionary<string, object> { { "type", "hostReady" } });
+            FlushPending();
+        }
 
-            List<string> files = new List<string>();
-            foreach (string a in _startupArgs)
+        /// <summary>Collects the openable paths out of an argument list.</summary>
+        private void QueueFiles(string[] args)
+        {
+            foreach (string a in args)
             {
                 if (string.IsNullOrEmpty(a) || a.StartsWith("-")) continue;
-                if (File.Exists(a)) files.Add(Path.GetFullPath(a));
+                try { if (File.Exists(a)) _pending.Add(Path.GetFullPath(a)); }
+                catch (Exception) { /* unusable path */ }
             }
-            if (files.Count > 0) SendFiles(files, true);
+        }
+
+        private void FlushPending()
+        {
+            if (!_ready || _pending.Count == 0) return;
+            List<string> batch = new List<string>(_pending);
+            _pending.Clear();
+            SendFiles(batch, true);
+        }
+
+        /// <summary>Receives file paths forwarded by a second instance.</summary>
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == SingleInstance.CopyDataMessage && m.LParam != IntPtr.Zero)
+            {
+                try
+                {
+                    SingleInstance.CopyData cd = (SingleInstance.CopyData)
+                        Marshal.PtrToStructure(m.LParam, typeof(SingleInstance.CopyData));
+                    if (cd.cbData > 0 && cd.lpData != IntPtr.Zero)
+                    {
+                        string payload = Marshal.PtrToStringUni(cd.lpData, cd.cbData / 2);
+                        if (payload != null)
+                            QueueFiles(payload.TrimEnd('\0').Split('\n'));
+                        FlushPending();
+                    }
+                }
+                catch (Exception) { /* malformed message; ignore it */ }
+
+                if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                Activate();
+                m.Result = (IntPtr)1;
+                return;
+            }
+            base.WndProc(ref m);
         }
 
         // --- bridge ---------------------------------------------------------
         private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
+            Log.Write("web message: " + e.WebMessageAsJson);
             Dictionary<string, object> msg;
             try { msg = _json.Deserialize<Dictionary<string, object>>(e.WebMessageAsJson); }
             catch (Exception) { return; }
@@ -425,22 +474,33 @@ namespace MarkdownViewer
 
         private void ShowOpenFolder()
         {
-            using (var dlg = new FolderBrowserDialog())
-            {
-                dlg.Description = "Choose a folder of Markdown files";
-                dlg.ShowNewFolderButton = false;
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            const string title = "Choose a folder of Markdown files";
+            string folder;
 
-                var found = new List<string>();
-                CollectMarkdown(dlg.SelectedPath, found, 0);
-                if (found.Count == 0)
+            // Falls back to the legacy tree dialog only if the modern one is unavailable.
+            bool modern = FolderPicker.TryShow(this, title, out folder);
+            Log.Write("folder picker: modern=" + modern + " folder=" + (folder == null ? "<none>" : folder));
+            if (!modern)
+            {
+                using (var dlg = new FolderBrowserDialog())
                 {
-                    Post(new Dictionary<string, object> {
-                        { "type", "notice" }, { "text", "No Markdown files in that folder" } });
-                    return;
+                    dlg.Description = title;
+                    dlg.ShowNewFolderButton = false;
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                    folder = dlg.SelectedPath;
                 }
-                SendFiles(found, true);
             }
+            if (string.IsNullOrEmpty(folder)) return;   // cancelled
+
+            var found = new List<string>();
+            CollectMarkdown(folder, found, 0);
+            if (found.Count == 0)
+            {
+                Post(new Dictionary<string, object> {
+                    { "type", "notice" }, { "text", "No Markdown files in that folder" } });
+                return;
+            }
+            SendFiles(found, true);
         }
 
         private static void CollectMarkdown(string dir, List<string> into, int depth)
@@ -668,6 +728,196 @@ namespace MarkdownViewer
                     max ? "1" : "0" }));
             }
             catch (Exception) { /* not worth bothering the user about */ }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // One window, many files. A second launch hands its arguments to the
+    // instance already running and then exits, so double-clicking five .md
+    // files in Explorer fills one sidebar instead of opening five windows.
+    // -----------------------------------------------------------------------
+    internal static class SingleInstance
+    {
+        internal const int CopyDataMessage = 0x004A;   // WM_COPYDATA
+        private const int SW_RESTORE = 9;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct CopyData
+        {
+            public IntPtr dwData;
+            public int cbData;
+            public IntPtr lpData;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr SendMessageW(IntPtr hWnd, int msg, IntPtr wParam, ref CopyData lParam);
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int cmd);
+        [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+
+        // Held for the lifetime of the first instance.
+        private static System.Threading.Mutex _mutex;
+
+        internal static bool ForwardToRunningInstance(string[] args)
+        {
+            bool createdNew;
+            try
+            {
+                _mutex = new System.Threading.Mutex(true, "Local\\MarkdownViewer.SingleInstance", out createdNew);
+            }
+            catch (Exception)
+            {
+                return false;   // cannot arbitrate; just open a window
+            }
+            if (createdNew) return false;   // we are the first instance
+
+            IntPtr target = FindRunningWindow();
+            if (target == IntPtr.Zero)
+            {
+                // The holder is not showing a window: still starting, or wedged.
+                try { _mutex.Close(); } catch (Exception) { }
+                _mutex = null;
+                return false;
+            }
+
+            var paths = new List<string>();
+            foreach (string a in args)
+            {
+                if (string.IsNullOrEmpty(a) || a.StartsWith("-")) continue;
+                try { if (File.Exists(a)) paths.Add(Path.GetFullPath(a)); }
+                catch (Exception) { }
+            }
+
+            if (paths.Count > 0)
+            {
+                string payload = string.Join("\n", paths.ToArray());
+                IntPtr buffer = Marshal.StringToCoTaskMemUni(payload);
+                try
+                {
+                    CopyData cd;
+                    cd.dwData = IntPtr.Zero;
+                    cd.cbData = (payload.Length + 1) * 2;   // includes the terminator
+                    cd.lpData = buffer;
+                    SendMessageW(target, CopyDataMessage, IntPtr.Zero, ref cd);
+                }
+                finally { Marshal.FreeCoTaskMem(buffer); }
+            }
+
+            if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
+            SetForegroundWindow(target);
+            return true;
+        }
+
+        /// <summary>
+        /// Waits briefly for the other window, which may still be starting up
+        /// when several files are opened at once.
+        /// </summary>
+        private static IntPtr FindRunningWindow()
+        {
+            Process me = Process.GetCurrentProcess();
+            for (int attempt = 0; attempt < 40; attempt++)
+            {
+                foreach (Process p in Process.GetProcessesByName(me.ProcessName))
+                {
+                    if (p.Id == me.Id) continue;
+                    try { if (p.MainWindowHandle != IntPtr.Zero) return p.MainWindowHandle; }
+                    catch (Exception) { }
+                }
+                System.Threading.Thread.Sleep(100);
+            }
+            return IntPtr.Zero;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The Vista-style folder dialog. FolderBrowserDialog on .NET Framework is
+    // still the cramped old tree control, so call IFileOpenDialog directly.
+    // -----------------------------------------------------------------------
+    internal static class FolderPicker
+    {
+        private const uint FOS_PICKFOLDERS = 0x00000020;
+        private const uint FOS_FORCEFILESYSTEM = 0x00000040;
+        private const uint SIGDN_FILESYSPATH = 0x80058000;
+
+        [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+        private class FileOpenDialogRcw { }
+
+        // Declared in vtable order: IModalWindow, then IFileDialog as far as
+        // GetResult. The members after it are unused and left out on purpose.
+        [ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"),
+         InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IFileDialog
+        {
+            [PreserveSig] int Show(IntPtr parent);
+            [PreserveSig] int SetFileTypes(uint count, IntPtr types);
+            [PreserveSig] int SetFileTypeIndex(uint index);
+            [PreserveSig] int GetFileTypeIndex(out uint index);
+            [PreserveSig] int Advise(IntPtr events, out uint cookie);
+            [PreserveSig] int Unadvise(uint cookie);
+            [PreserveSig] int SetOptions(uint options);
+            [PreserveSig] int GetOptions(out uint options);
+            [PreserveSig] int SetDefaultFolder(IShellItem item);
+            [PreserveSig] int SetFolder(IShellItem item);
+            [PreserveSig] int GetFolder(out IShellItem item);
+            [PreserveSig] int GetCurrentSelection(out IShellItem item);
+            [PreserveSig] int SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+            [PreserveSig] int GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+            [PreserveSig] int SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+            [PreserveSig] int SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+            [PreserveSig] int SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+            [PreserveSig] int GetResult(out IShellItem item);
+        }
+
+        [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"),
+         InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellItem
+        {
+            [PreserveSig] int BindToHandler(IntPtr bc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+            [PreserveSig] int GetParent(out IShellItem parent);
+            [PreserveSig] int GetDisplayName(uint sigdn, out IntPtr name);
+        }
+
+        /// <summary>
+        /// Returns false only when the modern dialog could not be used, so the
+        /// caller can fall back. A true result with a null path means the user
+        /// cancelled, which must not open a second dialog.
+        /// </summary>
+        internal static bool TryShow(IWin32Window owner, string title, out string path)
+        {
+            path = null;
+            object dialog = null;
+            try
+            {
+                dialog = new FileOpenDialogRcw();
+                IFileDialog fd = (IFileDialog)dialog;
+
+                uint options;
+                if (fd.GetOptions(out options) != 0) return false;
+                if (fd.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM) != 0) return false;
+                fd.SetTitle(title);
+
+                if (fd.Show(owner == null ? IntPtr.Zero : owner.Handle) != 0) return true;  // cancelled
+
+                IShellItem item;
+                if (fd.GetResult(out item) != 0 || item == null) return true;
+                try
+                {
+                    IntPtr buffer;
+                    if (item.GetDisplayName(SIGDN_FILESYSPATH, out buffer) != 0) return true;
+                    try { path = Marshal.PtrToStringUni(buffer); }
+                    finally { Marshal.FreeCoTaskMem(buffer); }
+                }
+                finally { Marshal.ReleaseComObject(item); }
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                if (dialog != null) { try { Marshal.ReleaseComObject(dialog); } catch (Exception) { } }
+            }
         }
     }
 }
