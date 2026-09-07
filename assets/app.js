@@ -20,6 +20,12 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+function countNewlines(s) {
+  let n = 0;
+  for (let i = s.indexOf('\n'); i >= 0; i = s.indexOf('\n', i + 1)) n++;
+  return n;
+}
+
 function formatBytes(n) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
@@ -152,19 +158,21 @@ function extractFootnotes(src) {
   const lines = src.split('\n');
   const defs = new Map();
   const kept = [];
+  const keptAt = [];     // kept line -> the line it came from, for the scroll sync
   let fence = null;
   let current = null;
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
     if (fenceMatch) {
       if (!fence) fence = fenceMatch[1][0];
       else if (fenceMatch[1][0] === fence) fence = null;
       if (current) { defs.set(current.id, current.lines.join('\n')); current = null; }
-      kept.push(line);
+      kept.push(line); keptAt.push(i);
       continue;
     }
-    if (fence) { kept.push(line); continue; }
+    if (fence) { kept.push(line); keptAt.push(i); continue; }
 
     const def = /^\[\^([^\]\s]+)\]:[ \t]*(.*)$/.exec(line);
     if (def) {
@@ -178,10 +186,10 @@ function extractFootnotes(src) {
       defs.set(current.id, current.lines.join('\n'));
       current = null;
     }
-    kept.push(line);
+    kept.push(line); keptAt.push(i);
   }
   if (current) defs.set(current.id, current.lines.join('\n'));
-  return { text: kept.join('\n'), defs };
+  return { text: kept.join('\n'), defs, lines: keptAt };
 }
 
 let footnoteDefs = new Map();
@@ -203,8 +211,8 @@ function footnoteHtml() {
 /* --- front matter --------------------------------------------------- */
 function extractFrontMatter(src) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(src);
-  if (!m) return { text: src, fm: null };
-  return { text: src.slice(m[0].length), fm: m[1] };
+  if (!m) return { text: src, fm: null, offset: 0 };
+  return { text: src.slice(m[0].length), fm: m[1], offset: countNewlines(m[0]) };
 }
 
 function frontMatterHtml(raw) {
@@ -461,18 +469,102 @@ function renderMarkdown(src) {
   const fnResult = extractFootnotes(fmResult.text);
   footnoteDefs = fnResult.defs;
 
-  let html = marked.parse(fnResult.text);
+  // Lexing and parsing separately costs nothing over marked.parse() and leaves
+  // the token list in hand, which is where the source lines come from.
+  const tokens = marked.lexer(fnResult.text);
+  let html = marked.parser(tokens);
   html += footnoteHtml();
   if (fmResult.fm !== null) html = frontMatterHtml(fmResult.fm) + html;
 
   renderedEl.innerHTML = toSafeHtml(html);
 
-  upgradeAlerts();
+  upgradeAlerts();          // before indexBlocks: an alert replaces its blockquote
+  indexBlocks(tokens, fnResult.text, (line) => {
+    const inFile = fnResult.lines[line];
+    return fmResult.offset + (inFile === undefined ? line : inFile);
+  });
   wireCopyButtons();
   resolveImages();
   renderMath();
   renderMermaid(false);
   buildOutline();
+}
+
+/* --- source lines behind the rendered blocks -------------------------- */
+/* Synchronised scrolling needs to know which source line each rendered block
+   started on. marked hands its renderers no position information, so the
+   top-level tokens are walked separately and matched, in order, against the
+   elements they produced. A block of raw HTML is the one token that can come
+   out as several elements, or as none once DOMPurify has been through it, so
+   it is run through the sanitiser on its own to count them; matching the rest
+   on tag name keeps anything else unforeseen from derailing the walk. */
+
+const BLOCK_TAGS = {
+  heading:    ['H1', 'H2', 'H3', 'H4', 'H5', 'H6'],
+  paragraph:  ['P'],
+  text:       ['P'],
+  list:       ['UL', 'OL'],
+  blockquote: ['BLOCKQUOTE', 'DIV'],   // a GitHub alert is a div by this point
+  table:      ['DIV'],
+  code:       ['DIV', 'PRE'],
+  mathBlock:  ['DIV'],
+  hr:         ['HR']
+};
+
+/** { line, el } for every rendered block that could be placed, in order. */
+let blockAnchors = [];
+
+function indexBlocks(tokens, text, toSourceLine) {
+  const probe = document.createElement('div');
+  const blocks = [];
+  let pos = 0;
+  let line = 0;
+
+  for (const tok of tokens) {
+    const raw = tok.raw || '';
+    // Link reference definitions leave no token behind, so the raws do not
+    // always add up; resync on the text itself rather than trusting them.
+    if (raw && !text.startsWith(raw, pos)) {
+      const at = text.indexOf(raw, pos);
+      if (at > pos) { line += countNewlines(text.slice(pos, at)); pos = at; }
+    }
+    if (tok.type !== 'space' && tok.type !== 'def') {
+      let span = 1;
+      if (tok.type === 'html') {
+        probe.innerHTML = toSafeHtml(raw);
+        span = probe.children.length;      // 0 for a comment, or for a stripped tag
+      }
+      if (span > 0) blocks.push({ type: tok.type, line, span });
+    }
+    line += countNewlines(raw);
+    pos += raw.length;
+  }
+
+  const kids = Array.from(renderedEl.children);
+  if (kids.length && kids[0].classList.contains('front-matter')) kids.shift();
+  if (kids.length && kids[kids.length - 1].classList.contains('footnotes')) kids.pop();
+
+  // A type with no tag of its own — raw html, a future extension — takes
+  // whatever is there rather than derailing the walk.
+  const fits = (block, el) => {
+    const tags = BLOCK_TAGS[block.type];
+    return !tags || tags.indexOf(el.tagName) >= 0;
+  };
+
+  blockAnchors = [];
+  let bi = 0, ki = 0;
+  while (bi < blocks.length && ki < kids.length) {
+    if (fits(blocks[bi], kids[ki])) {
+      blockAnchors.push({ line: toSourceLine(blocks[bi].line), el: kids[ki] });
+      ki += blocks[bi].span;    // the rest of a raw HTML block shares its line
+      bi++;
+    } else if (bi + 1 < blocks.length && fits(blocks[bi + 1], kids[ki])) {
+      bi++;                     // that token rendered to nothing recognisable
+    } else {
+      ki++;                     // that element came from something else
+    }
+  }
+  invalidateSyncMap();
 }
 
 /* --- GitHub alerts: > [!NOTE] ---------------------------------------- */
@@ -1841,6 +1933,7 @@ function setView(view) {
   $('#panes').dataset.view = view;
   $$('#segmented button').forEach((b) => b.classList.toggle('is-active', b.dataset.view === view));
   $('#btn-sync').style.display = view === 'split' ? '' : 'none';
+  invalidateSyncMap();
 }
 
 function setSplit(pct) {
@@ -1848,6 +1941,7 @@ function setSplit(pct) {
   $('#panes').style.setProperty('--split', state.split + '%');
   $('#gutter').setAttribute('aria-valuenow', Math.round(state.split));
   store.set('split', state.split);
+  invalidateSyncMap();
 }
 
 function initGutter() {
@@ -1899,24 +1993,109 @@ function initGutter() {
   });
 }
 
+/* Keeping the panes together is a mapping problem rather than a ratio: the
+   same document is taller on one side than the other, and by different amounts
+   in different places — a table is a few wrapped source lines against a
+   screenful of rendered rows. Giving one pane less width pulls the two further
+   apart still, because only the raw side rewraps. So the panes are pinned to
+   each other at the top of every rendered block, and anything in between is
+   interpolated. */
+
+/** Pairs of [raw y, rendered y], strictly increasing down both columns. */
+let syncMap = null;
+
+function invalidateSyncMap() { syncMap = null; }
+
+function buildSyncMap() {
+  const rawBox = $('#raw-scroll');
+  const renderedBox = $('#rendered-scroll');
+  const pairs = [[0, 0]];
+  let lastRaw = 0;
+  let lastRendered = 0;
+
+  for (const anchor of blockAnchors) {
+    const row = rawEl.children[anchor.line];
+    if (!row || !anchor.el.isConnected) continue;
+    const y = row.offsetTop;
+    const y2 = anchor.el.offsetTop;
+    // A pair that does not advance both sides would invert the mapping, which
+    // a mismatched block or a floated element can otherwise produce.
+    if (y > lastRaw && y2 > lastRendered) {
+      pairs.push([y, y2]);
+      lastRaw = y;
+      lastRendered = y2;
+    }
+  }
+
+  // Both panes end in the same headroom, so tying the ends together keeps
+  // "scrolled to the bottom" meaning the same thing on either side.
+  const rawEnd = rawBox.scrollHeight - rawBox.clientHeight;
+  const renderedEnd = renderedBox.scrollHeight - renderedBox.clientHeight;
+  if (rawEnd > lastRaw && renderedEnd > lastRendered) pairs.push([rawEnd, renderedEnd]);
+
+  syncMap = pairs.length > 1 ? pairs : null;
+  return syncMap;
+}
+
+/** Piecewise-linear lookup. `from` is the column being read: 0 raw, 1 rendered. */
+function mapAcross(pairs, y, from) {
+  const to = from ? 0 : 1;
+  let lo = 0;
+  let hi = pairs.length - 2;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (pairs[mid][from] <= y) lo = mid; else hi = mid - 1;
+  }
+  const a = pairs[lo];
+  const b = pairs[lo + 1];
+  const span = b[from] - a[from];
+  return span > 0 ? a[to] + ((y - a[from]) / span) * (b[to] - a[to]) : a[to];
+}
+
 function initScrollSync() {
   const raw = $('#raw-scroll');
   const rendered = $('#rendered-scroll');
   let lock = 0;
 
-  const mirror = (src, dst) => {
+  const mirror = (src, dst, from) => {
     if (!state.sync || state.view !== 'split') return;
     if (lock) return;
     lock = 1;
-    setScrollRatio(dst, getScrollRatio(src));
+    const max = dst.scrollHeight - dst.clientHeight;
+    if (max > 0) {
+      const pairs = syncMap || buildSyncMap();
+      // No anchors placed (an empty or unparsed document): fall back to ratio.
+      const y = pairs ? mapAcross(pairs, src.scrollTop, from) : getScrollRatio(src) * max;
+      dst.scrollTop = Math.max(0, Math.min(max, y));
+    }
     requestAnimationFrame(() => { lock = 0; });
   };
 
-  raw.addEventListener('scroll', () => mirror(raw, rendered), { passive: true });
+  raw.addEventListener('scroll', () => mirror(raw, rendered, 0), { passive: true });
   rendered.addEventListener('scroll', () => {
-    mirror(rendered, raw);
+    mirror(rendered, raw, 1);
     updateOutlineActive();
   }, { passive: true });
+
+  // A pane changing width rewraps the source and moves every anchor, so on top
+  // of dropping the pairs the rendered side is put back in step: a drag of the
+  // divider otherwise leaves the two showing different parts of the document
+  // until the next scroll.
+  let realign = 0;
+  const paneObserver = new ResizeObserver(() => {
+    invalidateSyncMap();
+    if (realign) return;
+    realign = requestAnimationFrame(() => { realign = 0; mirror(raw, rendered, 0); });
+  });
+  paneObserver.observe(raw);
+  paneObserver.observe(rendered);
+
+  // The content changing height — a keystroke rewrapping a line, an image or a
+  // diagram arriving late — only invalidates. Pulling the editor's scroll
+  // around underneath someone while they type would be intolerable.
+  const contentObserver = new ResizeObserver(invalidateSyncMap);
+  contentObserver.observe(rawEl);
+  contentObserver.observe(renderedEl);
 }
 
 /* ======================================================================

@@ -607,7 +607,11 @@ kbd {
   caret-color: var(--accent);
   -webkit-text-fill-color: transparent;
 }
-.raw-input::selection { background: var(--sel); }
+/* The selection is painted in the textarea's own layer, directly over the
+   highlighted mirror, so an opaque colour blanks the text out. Tinting the
+   mirror instead of covering it keeps the highlighting legible; 28% of the
+   accent lands on the same warm tone as --sel in both themes. */
+.raw-input::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 .raw-input::-webkit-scrollbar { display: none; }
 
 /* Search hits, drawn in the mirror underneath the transparent textarea. */
