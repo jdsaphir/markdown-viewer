@@ -466,7 +466,10 @@ function renderMarkdown(src) {
   footnoteOrder = [];
 
   const fmResult = extractFrontMatter(src);
-  frontMatterLines = fmResult.fm !== null ? fmResult.offset : 0;
+  // Rows, not newlines: front matter closing at the very end of the file has
+  // no newline after its last delimiter, and that row still belongs to it.
+  const fmRaw = src.slice(0, src.length - fmResult.text.length);
+  frontMatterLines = fmResult.fm === null ? 0 : countNewlines(fmRaw) + (/\n$/.test(fmRaw) ? 0 : 1);
   const fnResult = extractFootnotes(fmResult.text);
   footnoteDefs = fnResult.defs;
 
@@ -1438,7 +1441,7 @@ function markCaretLine() {
 
 let frontMatterLines = 0;   // source lines taken by front matter, 0 if none
 
-/** The rendered target for a source line: { el, stopAt?, code?, codeLine? } or null. */
+/** The rendered target for a source line: { el, startAt?, stopAt?, code?, codeLine? } or null. */
 function renderedTargetFor(line) {
   if (line < frontMatterLines) {
     const fm = renderedEl.querySelector('.front-matter');
@@ -1488,7 +1491,9 @@ function listItemAt(tok, listEl, rel) {
     // The item's own text keeps its lines, less the indent, so nested lists can
     // be walked in its coordinates just as the top level is in the document's.
     const nested = Array.from(li.children).filter((el) => el.tagName === 'UL' || el.tagName === 'OL');
+    const own = rel - start;              // the caret's line within this item
     let p = 0, ln = 0, ni = 0;
+    let startAt = null, stopAt = nested[0] || null;
     for (const t of item.tokens || []) {
       const raw = t.raw || '';
       const found = item.text.indexOf(raw, p);
@@ -1496,14 +1501,21 @@ function listItemAt(tok, listEl, rel) {
       ln += countNewlines(item.text.slice(p, found));
       p = found;
       if (t.type === 'list' && nested[ni]) {
-        const hit = listItemAt(t, nested[ni++], rel - start - ln);
+        const listEl = nested[ni++];
+        const hit = listItemAt(t, listEl, own - ln);
         if (hit) return hit;
+        // Content can resume after a nested list; the parent's segment then
+        // runs from this list's end to the next one, not from the item's top.
+        if (own > ln + countNewlines(raw.replace(/\s+$/, ''))) {
+          startAt = listEl;
+          stopAt = nested[ni] || null;
+        }
       }
       ln += countNewlines(raw);
       p += raw.length;
     }
-    // Stop short of any nested list, so a parent lights only its own line.
-    return { el: li, stopAt: nested[0] || null };
+    // Only the parent's own segment, never the nested lists around it.
+    return { el: li, startAt, stopAt };
   }
   return null;
 }
@@ -1530,7 +1542,7 @@ function markRenderedLine() {
     // Full reading width, like a row on the raw side, bleeding into the margin.
     const body = renderedEl.getBoundingClientRect();
     const cs = getComputedStyle(renderedEl);
-    top = r.top - 3;
+    top = (target.startAt ? Math.max(r.top, target.startAt.getBoundingClientRect().bottom) : r.top) - 3;
     bottom = (target.stopAt ? Math.min(r.bottom, target.stopAt.getBoundingClientRect().top) : r.bottom) + 3;
     left = body.left + parseFloat(cs.paddingLeft) - 10;
     right = body.right - parseFloat(cs.paddingRight) + 10;
