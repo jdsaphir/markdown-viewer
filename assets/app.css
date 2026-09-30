@@ -159,6 +159,17 @@ kbd {
 .brand-mark { width: 19px; height: 19px; flex: none; }
 .brand-mark rect { fill: var(--accent); }
 .brand-mark path { fill: #fff; }
+.brand-version {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  margin-left: -2px;
+  transform: translateY(1px);   /* sit on the name's baseline, not its centre */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .sidebar-actions {
   display: flex;
