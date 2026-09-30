@@ -466,6 +466,10 @@ function renderMarkdown(src) {
   footnoteOrder = [];
 
   const fmResult = extractFrontMatter(src);
+  // Rows, not newlines: front matter closing at the very end of the file has
+  // no newline after its last delimiter, and that row still belongs to it.
+  const fmRaw = src.slice(0, src.length - fmResult.text.length);
+  frontMatterLines = fmResult.fm === null ? 0 : countNewlines(fmRaw) + (/\n$/.test(fmRaw) ? 0 : 1);
   const fnResult = extractFootnotes(fmResult.text);
   footnoteDefs = fnResult.defs;
 
@@ -488,6 +492,7 @@ function renderMarkdown(src) {
   renderMath();
   renderMermaid(false);
   buildOutline();
+  markRenderedLine();
 }
 
 /* --- source lines behind the rendered blocks -------------------------- */
@@ -511,7 +516,8 @@ const BLOCK_TAGS = {
   hr:         ['HR']
 };
 
-/** { line, el } for every rendered block that could be placed, in order. */
+/** { line, end, el, tok } for every rendered block that could be placed, in
+    order. `line` and `end` are the first and last source lines it occupies. */
 let blockAnchors = [];
 
 function indexBlocks(tokens, text, toSourceLine) {
@@ -534,7 +540,9 @@ function indexBlocks(tokens, text, toSourceLine) {
         probe.innerHTML = toSafeHtml(raw);
         span = probe.children.length;      // 0 for a comment, or for a stripped tag
       }
-      if (span > 0) blocks.push({ type: tok.type, line, span });
+      // The last line the block itself occupies, not the blank ones after it.
+      const end = line + countNewlines(raw.replace(/\s+$/, ''));
+      if (span > 0) blocks.push({ type: tok.type, line, end, span, tok });
     }
     line += countNewlines(raw);
     pos += raw.length;
@@ -555,7 +563,8 @@ function indexBlocks(tokens, text, toSourceLine) {
   let bi = 0, ki = 0;
   while (bi < blocks.length && ki < kids.length) {
     if (fits(blocks[bi], kids[ki])) {
-      blockAnchors.push({ line: toSourceLine(blocks[bi].line), el: kids[ki] });
+      const b = blocks[bi];
+      blockAnchors.push({ line: toSourceLine(b.line), end: toSourceLine(b.end), el: kids[ki], tok: b.tok });
       ki += blocks[bi].span;    // the rest of a raw HTML block shares its line
       bi++;
     } else if (bi + 1 < blocks.length && fits(blocks[bi + 1], kids[ki])) {
@@ -1416,9 +1425,144 @@ function caretLineIndex() {
 function markCaretLine() {
   const previous = rawEl.querySelector('.raw-line.is-caret');
   if (previous) previous.classList.remove('is-caret');
-  if (document.activeElement !== editorInput) return;
-  const row = rawEl.children[caretLineIndex()];
-  if (row) row.classList.add('is-caret');
+  if (document.activeElement === editorInput) {
+    const row = rawEl.children[caretLineIndex()];
+    if (row) row.classList.add('is-caret');
+  }
+  markRenderedLine();
+}
+
+/* --- the caret's line, echoed in the rendered pane --------------------- */
+/* In split view the rendered pane lights up whatever the caret's source line
+   became: a table row, a list item, a line of a code block, or failing those
+   the whole block. It is a band laid over the pane rather than a class on the
+   element, because code blocks and table rows paint backgrounds of their own
+   that a class would lose to. */
+
+let frontMatterLines = 0;   // source lines taken by front matter, 0 if none
+
+/** The rendered target for a source line: { el, startAt?, stopAt?, code?, codeLine? } or null. */
+function renderedTargetFor(line) {
+  if (line < frontMatterLines) {
+    const fm = renderedEl.querySelector('.front-matter');
+    return fm ? { el: fm } : null;
+  }
+
+  let a = null;
+  for (let i = blockAnchors.length - 1; i >= 0; i--) {
+    if (blockAnchors[i].line <= line) { a = blockAnchors[i]; break; }
+  }
+  if (!a || line > a.end) return null;   // a blank line between blocks
+  const rel = line - a.line;
+
+  if (a.tok.type === 'table') {
+    // Header, then the delimiter row (which has no row of its own), then the body.
+    const table = a.el.querySelector('table');
+    const row = table && table.rows[rel <= 1 ? 0 : rel - 1];
+    if (row) return { el: row };
+  } else if (a.tok.type === 'code') {
+    const code = a.el.querySelector('pre > code');
+    const indented = a.tok.codeBlockStyle === 'indented';
+    // Counted from the source, not tok.text: an empty block and one holding a
+    // single blank line both have empty text, but only one has a line to light.
+    const rows = a.tok.raw.replace(/\n+$/, '').split('\n');
+    const closed = !indented && rows.length > 1 && /^ {0,3}(`{3,}|~{3,})\s*$/.test(rows[rows.length - 1]);
+    const lines = indented ? rows.length : rows.length - 1 - (closed ? 1 : 0);
+    const k = indented ? rel : rel - 1;   // past the opening fence
+    if (code && k >= 0 && k < lines) {
+      return { el: code.parentNode, code, codeLine: k };
+    }
+  } else if (a.tok.type === 'list') {
+    const hit = listItemAt(a.tok, a.el, rel);
+    if (hit) return hit;
+  }
+  return { el: a.el };
+}
+
+/** Finds the list item on line `rel` of a list token, descending into nested lists. */
+function listItemAt(tok, listEl, rel) {
+  const lis = Array.from(listEl.children).filter((el) => el.tagName === 'LI');
+  let pos = 0;
+  for (let i = 0; i < tok.items.length; i++) {
+    const item = tok.items[i];
+    const at = tok.raw.indexOf(item.raw, pos);
+    if (at < 0) return null;
+    pos = at + item.raw.length;
+    const start = countNewlines(tok.raw.slice(0, at));
+    const end = start + countNewlines(item.raw.replace(/\s+$/, ''));
+    if (rel < start || rel > end) continue;
+
+    const li = lis[i];
+    if (!li) return null;
+    // The item's own text keeps its lines, less the indent, so nested lists can
+    // be walked in its coordinates just as the top level is in the document's.
+    const nested = Array.from(li.children).filter((el) => el.tagName === 'UL' || el.tagName === 'OL');
+    const own = rel - start;              // the caret's line within this item
+    let p = 0, ln = 0, ni = 0;
+    let startAt = null, stopAt = nested[0] || null;
+    for (const t of item.tokens || []) {
+      const raw = t.raw || '';
+      const found = item.text.indexOf(raw, p);
+      if (found < 0) continue;
+      ln += countNewlines(item.text.slice(p, found));
+      p = found;
+      if (t.type === 'list' && nested[ni]) {
+        const listEl = nested[ni++];
+        const hit = listItemAt(t, listEl, own - ln);
+        if (hit) return hit;
+        // Content can resume after a nested list; the parent's segment then
+        // runs from this list's end to the next one, not from the item's top.
+        if (own > ln + countNewlines(raw.replace(/\s+$/, ''))) {
+          startAt = listEl;
+          stopAt = nested[ni] || null;
+        }
+      }
+      ln += countNewlines(raw);
+      p += raw.length;
+    }
+    // Only the parent's own segment, never the nested lists around it.
+    return { el: li, startAt, stopAt };
+  }
+  return null;
+}
+
+function markRenderedLine() {
+  const band = $('#line-band');
+  const box = $('#rendered-scroll');
+  const target = state.view === 'split' && document.activeElement === editorInput
+    ? renderedTargetFor(caretLineIndex())
+    : null;
+  const r = target && target.el.getBoundingClientRect();
+  // Nothing to show, or the target is out of the layout (a closed <details>).
+  if (!r || (!r.width && !r.height)) { band.hidden = true; return; }
+
+  let top, bottom, left, right;
+  if (target.code) {
+    const c = target.code.getBoundingClientRect();
+    const lh = parseFloat(getComputedStyle(target.code).lineHeight) || 20;
+    top = c.top + target.codeLine * lh;
+    bottom = top + lh;
+    // A line the render dropped (a block of nothing but blank lines renders
+    // empty) has no row to light, so the block stands in for it.
+    if (bottom > c.bottom + 1) { top = r.top + 1; bottom = r.bottom - 1; }
+    left = r.left + 1;                  // inside the block's border
+    right = r.right - 1;
+  } else {
+    // Full reading width, like a row on the raw side, bleeding into the margin.
+    const body = renderedEl.getBoundingClientRect();
+    const cs = getComputedStyle(renderedEl);
+    top = (target.startAt ? Math.max(r.top, target.startAt.getBoundingClientRect().bottom) : r.top) - 3;
+    bottom = (target.stopAt ? Math.min(r.bottom, target.stopAt.getBoundingClientRect().top) : r.bottom) + 3;
+    left = body.left + parseFloat(cs.paddingLeft) - 10;
+    right = body.right - parseFloat(cs.paddingRight) + 10;
+  }
+
+  const b = box.getBoundingClientRect();
+  band.style.top = (top - b.top + box.scrollTop) + 'px';
+  band.style.left = (left - b.left + box.scrollLeft) + 'px';
+  band.style.width = Math.max(0, right - left) + 'px';
+  band.style.height = Math.max(0, bottom - top) + 'px';
+  band.hidden = false;
 }
 
 function updateCaretStatus() {
@@ -1934,6 +2078,7 @@ function setView(view) {
   $$('#segmented button').forEach((b) => b.classList.toggle('is-active', b.dataset.view === view));
   $('#btn-sync').style.display = view === 'split' ? '' : 'none';
   invalidateSyncMap();
+  markRenderedLine();
 }
 
 function setSplit(pct) {
@@ -2096,6 +2241,16 @@ function initScrollSync() {
   const contentObserver = new ResizeObserver(invalidateSyncMap);
   contentObserver.observe(rawEl);
   contentObserver.observe(renderedEl);
+
+  // Anything that reflows the rendered side — a new width, an image or a
+  // diagram arriving — moves the caret's band with it.
+  let replace = 0;
+  const bandObserver = new ResizeObserver(() => {
+    if (replace) return;
+    replace = requestAnimationFrame(() => { replace = 0; markRenderedLine(); });
+  });
+  bandObserver.observe(rendered);
+  bandObserver.observe(renderedEl);
 }
 
 /* ======================================================================

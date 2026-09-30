@@ -98,6 +98,9 @@ rendered side follows a moment later.
   items (incrementing as it goes), task list items, blockquotes, and plain
   indentation. Pressing it on an empty item ends the list instead.
 - The status bar shows **line and column**, and the selected character count.
+- **The line you are on** is tinted. In Split view the rendered side tints what
+  that line became: the table row, the list item, the line inside a code block,
+  or otherwise the whole paragraph or block.
 
 ### Find and replace
 
