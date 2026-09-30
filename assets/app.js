@@ -1462,8 +1462,14 @@ function renderedTargetFor(line) {
     if (row) return { el: row };
   } else if (a.tok.type === 'code') {
     const code = a.el.querySelector('pre > code');
-    const k = a.tok.codeBlockStyle === 'indented' ? rel : rel - 1;   // past the opening fence
-    if (code && k >= 0 && k <= countNewlines(a.tok.text)) {
+    const indented = a.tok.codeBlockStyle === 'indented';
+    // Counted from the source, not tok.text: an empty block and one holding a
+    // single blank line both have empty text, but only one has a line to light.
+    const rows = a.tok.raw.replace(/\n+$/, '').split('\n');
+    const closed = !indented && rows.length > 1 && /^ {0,3}(`{3,}|~{3,})\s*$/.test(rows[rows.length - 1]);
+    const lines = indented ? rows.length : rows.length - 1 - (closed ? 1 : 0);
+    const k = indented ? rel : rel - 1;   // past the opening fence
+    if (code && k >= 0 && k < lines) {
       return { el: code.parentNode, code, codeLine: k };
     }
   } else if (a.tok.type === 'list') {
@@ -1536,6 +1542,9 @@ function markRenderedLine() {
     const lh = parseFloat(getComputedStyle(target.code).lineHeight) || 20;
     top = c.top + target.codeLine * lh;
     bottom = top + lh;
+    // A line the render dropped (a block of nothing but blank lines renders
+    // empty) has no row to light, so the block stands in for it.
+    if (bottom > c.bottom + 1) { top = r.top + 1; bottom = r.bottom - 1; }
     left = r.left + 1;                  // inside the block's border
     right = r.right - 1;
   } else {
