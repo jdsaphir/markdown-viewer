@@ -217,7 +217,7 @@ follow the active theme.
 ## Project layout
 
 ```
-index.html                   markup and the pre-paint theme switch
+index.html                   markup, the pre-paint theme switch, and the version
 assets/app.css               application shell
 assets/markdown.css          rendered-document styling
 assets/highlight.css         syntax colours, shared by both themes
@@ -229,6 +229,10 @@ desktop/MakeIcon.cs          draws the .ico at build time, no image tooling need
 desktop/app.manifest         per-monitor DPI awareness
 desktop/build.ps1            the whole build
 ```
+
+The version is written once, beside the app's name in `index.html`, and shows in
+the top-left corner next to the logo. `build.ps1` reads it from there and stamps
+it into the exe, so it also appears under *Properties* → *Details*.
 
 Rendered HTML is sanitised with DOMPurify before it reaches the page, so opening
 an untrusted Markdown file cannot run scripts. The desktop shell serves only its

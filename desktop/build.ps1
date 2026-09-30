@@ -60,7 +60,28 @@ if ($LASTEXITCODE -ne 0) { throw 'Failed to compile the icon generator.' }
 & (Join-Path $obj 'MakeIcon.exe') $ico
 if ($LASTEXITCODE -ne 0) { throw 'Failed to generate the icon.' }
 
-# --- 3. The application ----------------------------------------------------
+# --- 3. Version ------------------------------------------------------------
+# The version is written once, in index.html, where the app shows it next to
+# its name. Stamping it into the exe from there keeps the two from drifting.
+$indexHtml = [IO.File]::ReadAllText((Join-Path $repo 'index.html'))
+$m = [regex]::Match($indexHtml, 'id="app-version"[^>]*>\s*(\d+)\.(\d+)\.(\d+)\s*<')
+if (-not $m.Success) { throw 'Could not find the version (id="app-version") in index.html.' }
+$version = '{0}.{1}.{2}' -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value
+$year = (Get-Date).Year
+
+$assemblyInfo = Join-Path $obj 'AssemblyInfo.cs'
+$lines = @(
+  'using System.Reflection;',
+  '[assembly: AssemblyTitle("Markdown Viewer")]',
+  '[assembly: AssemblyProduct("Markdown Viewer")]',
+  "[assembly: AssemblyCopyright(""Copyright (c) $year Saphir Duriez"")]",
+  "[assembly: AssemblyVersion(""$version.0"")]",
+  "[assembly: AssemblyFileVersion(""$version.0"")]",
+  "[assembly: AssemblyInformationalVersion(""$version"")]"
+)
+[IO.File]::WriteAllLines($assemblyInfo, $lines)
+
+# --- 4. The application ----------------------------------------------------
 # The web app is embedded so a lone .exe still works; copies sitting next to
 # the exe take precedence, which keeps `index.html` editable in place.
 $webFiles = @(
@@ -95,6 +116,7 @@ foreach ($f in $webFiles) {
 }
 
 $cscArgs += (Join-Path $here 'MarkdownViewer.cs')
+$cscArgs += $assemblyInfo
 
 Write-Host 'Compiling MarkdownViewer.exe...'
 & $csc $cscArgs
@@ -102,5 +124,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
 
 $size = [Math]::Round((Get-Item $out).Length / 1MB, 2)
 Write-Host ''
-Write-Host "Built $out ($size MB)" -ForegroundColor Green
+Write-Host "Built $out, version $version ($size MB)" -ForegroundColor Green
 Write-Host 'Run it by double-clicking, or pass a Markdown file:  MarkdownViewer.exe notes.md'
