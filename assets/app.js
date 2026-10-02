@@ -1327,19 +1327,26 @@ function setupWatch() {
     try {
       const file = await current.handle.getFile();
       if (file.lastModified === current.lastModified) return;
+      const norm = normaliseText(await file.text());
       current.lastModified = file.lastModified;
 
+      // Our own save moves the timestamp too. Nothing changed, so the editor
+      // is left alone: reloading it would wipe its undo history.
+      if (norm.text === current.savedText) return;
+
       // Same as a reload pushed by the desktop host: unsaved edits are kept,
-      // and the text is normalised like every other way a file comes in.
+      // and the text is normalised like every other way a file comes in. The
+      // checks come after the reads, so typing or switching documents while
+      // they were pending is seen here.
       if (isDirty(current)) {
         toast(current.name + ' changed on disk — your unsaved edits were kept');
         return;
       }
-      const norm = normaliseText(await file.text());
       current.text = norm.text;
       current.savedText = norm.text;
       current.eol = norm.eol;
       current.size = file.size;
+      if (current !== activeDoc()) return;   // picked up when it is opened
       rerenderActive();
       toast('Reloaded ' + current.name);
     } catch (_) { /* file busy or removed; try again next tick */ }
