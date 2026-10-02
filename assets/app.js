@@ -1327,14 +1327,20 @@ function setupWatch() {
     try {
       const file = await current.handle.getFile();
       if (file.lastModified === current.lastModified) return;
-      const scrollRatio = getScrollRatio($('#rendered-scroll'));
-      current.text = await file.text();
-      current.size = file.size;
       current.lastModified = file.lastModified;
-      renderRaw(current.text);
-      renderMarkdown(current.text);
-      updateStats(current);
-      requestAnimationFrame(() => setScrollRatio($('#rendered-scroll'), scrollRatio));
+
+      // Same as a reload pushed by the desktop host: unsaved edits are kept,
+      // and the text is normalised like every other way a file comes in.
+      if (isDirty(current)) {
+        toast(current.name + ' changed on disk — your unsaved edits were kept');
+        return;
+      }
+      const norm = normaliseText(await file.text());
+      current.text = norm.text;
+      current.savedText = norm.text;
+      current.eol = norm.eol;
+      current.size = file.size;
+      rerenderActive();
       toast('Reloaded ' + current.name);
     } catch (_) { /* file busy or removed; try again next tick */ }
   }, 1200);
