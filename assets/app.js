@@ -347,6 +347,17 @@ const renderedEl = $('#rendered');
 const rawEl = $('#raw-code');
 const RAW_HIGHLIGHT_LIMIT = 400 * 1024;
 
+/* highlight.js tries its bold and italic rules before its thematic-break rule,
+   so a `***` line opens a bold run that swallows the rest of the document, and
+   `___` or `* * *` are never recognised at all. A CommonMark thematic break
+   (three or more of one of - * _, optionally spaced, up to three spaces of
+   indent) goes first instead, left unstyled like the `---` the grammar already
+   handles. The grammar compiles on first use, so this has to run before then. */
+hljs.getLanguage('markdown').contains.unshift({
+  begin: /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/,
+  relevance: 0
+});
+
 /** Split highlight.js output into lines, re-opening spans that cross a break. */
 function splitHighlightedLines(html) {
   const lines = [];
