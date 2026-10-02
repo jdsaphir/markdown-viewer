@@ -347,6 +347,27 @@ const renderedEl = $('#rendered');
 const rawEl = $('#raw-code');
 const RAW_HIGHLIGHT_LIMIT = 400 * 1024;
 
+/* highlight.js tries its bold and italic rules before its thematic-break rule,
+   so a `***` line opens a bold run that swallows the rest of the document, and
+   `___` or `* * *` are never recognised at all. A CommonMark thematic break
+   (three or more of one of - * _, optionally spaced, up to three spaces of
+   indent) goes first instead, left unstyled like the `---` the grammar already
+   handles. Breaks inside block quotes and list items (`> ***`, `- ***`) count
+   too: the lookbehind lets quote and list markers come first without taking
+   them, so they keep their own colours. Quoted lines are lexed inside the
+   quote rule, which needs its own copy. The grammar compiles on first use, so
+   this has to run before then. */
+{
+  const markdown = hljs.getLanguage('markdown');
+  const thematicBreak = {
+    begin: /(?<=^(?:[ \t]*(?:>[ \t]?|[*+-][ \t]+|\d{1,9}[.)][ \t]+))*) {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/,
+    relevance: 0
+  };
+  markdown.contains.unshift(thematicBreak);
+  const quote = markdown.contains.find((mode) => mode.className === 'quote');
+  if (quote) quote.contains.unshift(thematicBreak);
+}
+
 /** Split highlight.js output into lines, re-opening spans that cross a break. */
 function splitHighlightedLines(html) {
   const lines = [];
@@ -1306,14 +1327,34 @@ function setupWatch() {
     try {
       const file = await current.handle.getFile();
       if (file.lastModified === current.lastModified) return;
-      const scrollRatio = getScrollRatio($('#rendered-scroll'));
-      current.text = await file.text();
-      current.size = file.size;
+      const norm = normaliseText(await file.text());
       current.lastModified = file.lastModified;
-      renderRaw(current.text);
-      renderMarkdown(current.text);
-      updateStats(current);
-      requestAnimationFrame(() => setScrollRatio($('#rendered-scroll'), scrollRatio));
+
+      // Our own save moves the timestamp too. The text is unchanged, so the
+      // editor is left alone (reloading it would wipe its undo history), but
+      // the line endings may have been converted on disk, and the next save
+      // should keep what is there now.
+      if (norm.text === current.savedText) {
+        current.eol = norm.eol;
+        current.size = file.size;
+        if (current === activeDoc()) updateStats(current);
+        return;
+      }
+
+      // Same as a reload pushed by the desktop host: unsaved edits are kept,
+      // and the text is normalised like every other way a file comes in. The
+      // checks come after the reads, so typing or switching documents while
+      // they were pending is seen here.
+      if (isDirty(current)) {
+        toast(current.name + ' changed on disk — your unsaved edits were kept');
+        return;
+      }
+      current.text = norm.text;
+      current.savedText = norm.text;
+      current.eol = norm.eol;
+      current.size = file.size;
+      if (current !== activeDoc()) return;   // picked up when it is opened
+      rerenderActive();
       toast('Reloaded ' + current.name);
     } catch (_) { /* file busy or removed; try again next tick */ }
   }, 1200);
