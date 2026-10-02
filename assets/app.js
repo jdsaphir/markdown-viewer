@@ -1330,9 +1330,16 @@ function setupWatch() {
       const norm = normaliseText(await file.text());
       current.lastModified = file.lastModified;
 
-      // Our own save moves the timestamp too. Nothing changed, so the editor
-      // is left alone: reloading it would wipe its undo history.
-      if (norm.text === current.savedText) return;
+      // Our own save moves the timestamp too. The text is unchanged, so the
+      // editor is left alone (reloading it would wipe its undo history), but
+      // the line endings may have been converted on disk, and the next save
+      // should keep what is there now.
+      if (norm.text === current.savedText) {
+        current.eol = norm.eol;
+        current.size = file.size;
+        if (current === activeDoc()) updateStats(current);
+        return;
+      }
 
       // Same as a reload pushed by the desktop host: unsaved edits are kept,
       // and the text is normalised like every other way a file comes in. The
