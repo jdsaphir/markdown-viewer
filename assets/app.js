@@ -352,11 +352,21 @@ const RAW_HIGHLIGHT_LIMIT = 400 * 1024;
    `___` or `* * *` are never recognised at all. A CommonMark thematic break
    (three or more of one of - * _, optionally spaced, up to three spaces of
    indent) goes first instead, left unstyled like the `---` the grammar already
-   handles. The grammar compiles on first use, so this has to run before then. */
-hljs.getLanguage('markdown').contains.unshift({
-  begin: /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/,
-  relevance: 0
-});
+   handles. Breaks inside block quotes and list items (`> ***`, `- ***`) count
+   too: the lookbehind lets quote and list markers come first without taking
+   them, so they keep their own colours. Quoted lines are lexed inside the
+   quote rule, which needs its own copy. The grammar compiles on first use, so
+   this has to run before then. */
+{
+  const markdown = hljs.getLanguage('markdown');
+  const thematicBreak = {
+    begin: /(?<=^(?:[ \t]*(?:>[ \t]?|[*+-][ \t]+|\d{1,9}[.)][ \t]+))*) {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/,
+    relevance: 0
+  };
+  markdown.contains.unshift(thematicBreak);
+  const quote = markdown.contains.find((mode) => mode.className === 'quote');
+  if (quote) quote.contains.unshift(thematicBreak);
+}
 
 /** Split highlight.js output into lines, re-opening spans that cross a break. */
 function splitHighlightedLines(html) {
