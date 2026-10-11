@@ -1194,7 +1194,18 @@ async function hostDrop(files, entries) {
   }
   // Kept in case the host cannot resolve a single path ('dropUnresolved').
   pendingDrop = found.filter((f) => isMarkdown(f.path));
-  host.postMessageWithAdditionalObjects({ type: 'openDropped' }, files);
+  // A File with no disk path behind it can make the post itself throw.
+  try { host.postMessageWithAdditionalObjects({ type: 'openDropped' }, files); }
+  catch (_) { await openPendingDrop(); }
+}
+
+/** Opens the dropped contents the page read itself, when the host cannot. */
+async function openPendingDrop() {
+  const dropped = pendingDrop || [];
+  pendingDrop = null;
+  const docs = await Promise.all(dropped.map(({ file, path }) => readFile(file, path)));
+  if (docs.length) addDocs(docs);
+  else toast('No Markdown files found');
 }
 
 async function handleDrop(dt) {
@@ -1294,15 +1305,7 @@ if (host) {
       return;
     }
 
-    if (msg.type === 'dropUnresolved') {
-      const dropped = pendingDrop || [];
-      pendingDrop = null;
-      Promise.all(dropped.map(({ file, path }) => readFile(file, path))).then((docs) => {
-        if (docs.length) addDocs(docs);
-        else toast('No Markdown files found');
-      });
-      return;
-    }
+    if (msg.type === 'dropUnresolved') { openPendingDrop(); return; }
 
     if (msg.type === 'update') {
       const doc = state.docs.find((d) => d.fullPath === msg.fullPath);
