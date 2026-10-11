@@ -980,6 +980,16 @@ function renderFileList() {
       closeDocs(btn.dataset.ids.split(','));
     });
   });
+  // A middle click anywhere on a file closes it, as it does a browser tab.
+  list.querySelectorAll('.file-item').forEach((item) => {
+    // Otherwise the wheel button starts the browser's autoscroll instead.
+    item.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+    item.addEventListener('auxclick', (e) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      closeDocs([item.querySelector('.file-open').dataset.id]);
+    });
+  });
 }
 
 /** Closes one document, or every document in a folder group. */
@@ -1166,8 +1176,48 @@ async function walkEntry(entry, prefix, out, depth = 0) {
   }
 }
 
+/**
+ * Desktop app: the page never learns where a dropped file lives, so a document
+ * it read itself has nowhere to save to and nothing to watch. The host can
+ * read the paths off the File objects, so it opens the documents; the page
+ * only keeps the images, which is how relative image links resolve.
+ */
+let pendingDrop = null;
+
+async function hostDrop(files, entries) {
+  const found = [];
+  for (const e of entries) await walkEntry(e, '', found);
+  if (!found.length) for (const f of files) found.push({ file: f, path: f.name });
+
+  for (const { file, path } of found) {
+    if (isImage(path)) state.assets.set(normalisePath(path), file);
+  }
+  // Kept in case the host cannot resolve a single path ('dropUnresolved').
+  pendingDrop = found.filter((f) => isMarkdown(f.path));
+  // A File with no disk path behind it can make the post itself throw.
+  try { host.postMessageWithAdditionalObjects({ type: 'openDropped' }, files); }
+  catch (_) { await openPendingDrop(); }
+}
+
+/** Opens the dropped contents the page read itself, when the host cannot. */
+async function openPendingDrop() {
+  const dropped = pendingDrop || [];
+  pendingDrop = null;
+  const docs = await Promise.all(dropped.map(({ file, path }) => readFile(file, path)));
+  if (docs.length) addDocs(docs);
+  else toast('No Markdown files found');
+}
+
 async function handleDrop(dt) {
   const items = dt.items ? Array.from(dt.items).filter((i) => i.kind === 'file') : [];
+
+  if (host && typeof host.postMessageWithAdditionalObjects === 'function' && dt.files && dt.files.length) {
+    // Both lists die with the drop event, so take them before anything awaits.
+    const files = Array.from(dt.files);
+    const entries = items.map((i) => (typeof i.webkitGetAsEntry === 'function' ? i.webkitGetAsEntry() : null)).filter(Boolean);
+    await hostDrop(files, entries);
+    return;
+  }
 
   // 1. Preferred: real handles, which allow auto-reload.
   if (items.length && typeof items[0].getAsFileSystemHandle === 'function') {
@@ -1251,8 +1301,11 @@ if (host) {
         fullPath: f.fullPath
       }));
       addDocs(entries, { activate: msg.activate !== false });
+      pendingDrop = null;
       return;
     }
+
+    if (msg.type === 'dropUnresolved') { openPendingDrop(); return; }
 
     if (msg.type === 'update') {
       const doc = state.docs.find((d) => d.fullPath === msg.fullPath);

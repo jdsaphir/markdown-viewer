@@ -440,6 +440,7 @@ namespace MarkdownViewer
             {
                 case "openFiles": ShowOpenFiles(); break;
                 case "openFolder": ShowOpenFolder(); break;
+                case "openDropped": OpenDropped(e); break;
                 case "unwatchAll": StopWatching(); break;
                 case "unwatch": Unwatch(Str(msg, "fullPath")); break;
                 case "save": SaveDocument(msg, false); break;
@@ -578,6 +579,64 @@ namespace MarkdownViewer
             try { parent = Path.GetDirectoryName(folder.TrimEnd('\\', '/')); }
             catch (Exception) { }
             SendFiles(found, true, string.IsNullOrEmpty(parent) ? folder : parent);
+        }
+
+        /// <summary>
+        /// Opens what was dropped on the page. The page cannot see where a
+        /// dropped file lives, so it hands the File objects over and the host
+        /// reads their paths; that way a dropped file saves in place and
+        /// auto-reloads exactly like one opened from the dialog.
+        /// </summary>
+        private void OpenDropped(CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            var found = new List<string>();
+            string containingFolder = null;
+            int resolved = 0;
+
+            try
+            {
+                foreach (object o in e.AdditionalObjects)
+                {
+                    var file = o as CoreWebView2File;
+                    if (file == null || string.IsNullOrEmpty(file.Path)) continue;
+                    string path = file.Path;
+
+                    if (Directory.Exists(path))
+                    {
+                        resolved++;
+                        // Keep the dropped folder's own name, as ShowOpenFolder does.
+                        if (containingFolder == null)
+                        {
+                            try { containingFolder = Path.GetDirectoryName(path.TrimEnd('\\', '/')); }
+                            catch (Exception) { }
+                            if (string.IsNullOrEmpty(containingFolder)) containingFolder = path;
+                        }
+                        CollectMarkdown(path, found, 0);
+                    }
+                    else if (File.Exists(path))
+                    {
+                        resolved++;
+                        if (IsMarkdown(path)) found.Add(Path.GetFullPath(path));
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Write("drop failed: " + ex.Message); }
+
+            Log.Write("drop: " + resolved + " item(s) resolved, " + found.Count + " Markdown file(s)");
+            if (resolved == 0)
+            {
+                // Nothing with a real path (dragged out of an archive, say):
+                // the page still holds the contents and opens those instead.
+                Post(new Dictionary<string, object> { { "type", "dropUnresolved" } });
+                return;
+            }
+            if (found.Count == 0)
+            {
+                Post(new Dictionary<string, object> {
+                    { "type", "notice" }, { "text", "No Markdown files found" } });
+                return;
+            }
+            SendFiles(found, true, containingFolder);
         }
 
         private static void CollectMarkdown(string dir, List<string> into, int depth)

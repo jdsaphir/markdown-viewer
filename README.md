@@ -170,8 +170,8 @@ sidebar: the folder you picked keeps its own name, and anything nested reads as
 finding one quickly, and relative image links and relative links between
 documents both resolve, so a folder of notes browses like a small wiki.
 
-To close one file, hover it in the sidebar and click the **×** on its right.
-The × on a folder heading closes that whole group, and **Clear** in the footer
+To close one file, hover it in the sidebar and click the **×** on its right, or
+middle-click (wheel-click) anywhere on it. The × on a folder heading closes that whole group, and **Clear** in the footer
 closes everything. Anything with unsaved changes asks before it goes.
 
 ### Auto-reload
